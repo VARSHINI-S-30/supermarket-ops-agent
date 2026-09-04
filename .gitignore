@@ -1,0 +1,73 @@
+# ==============================
+# Environment / Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ==============================
+# Database
+# ==============================
+*.db
+*.sqlite
+*.sqlite3
+
+# Local supermarket database
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# ==============================
+# Generated Files
+# ==============================
+generated/*.pdf
+generated/*.pptx
+generated/*.png
+generated/*.jpg
+generated/*.jpeg
+
+# ==============================
+# Testing / Coverage
+# ==============================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==============================
+# IDE / Editor
+# ==============================
+.vscode/
+.idea/
+
+# ==============================
+# OS Files
+# ==============================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==============================
+# Logs
+# ==============================
+*.log
+
+# ==============================
+# Temporary Files
+# ==============================
+*.tmp
+*.temp
+*.bak
