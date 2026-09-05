@@ -1,7 +1,18 @@
 from app.database.db import engine, Base
-from app.database.models import Product, Customer
+from app.database.models import (
+    Product,
+    Customer,
+    Bill,
+    BillItem,
+    OwnerPreference
+)
 
 
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(
+    bind=engine
+)
 
-print("Database created successfully!")
+
+print(
+    "Database tables created successfully!"
+)

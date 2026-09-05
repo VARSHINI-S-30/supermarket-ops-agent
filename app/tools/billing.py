@@ -1,17 +1,76 @@
-from app.database.db import SessionLocal
-from app.database.models import Bill, BillItem, Product, Customer
+from decimal import Decimal, ROUND_HALF_UP
+
+from app.database.db import (
+    SessionLocal,
+    begin_write_transaction
+)
+
+from app.database.models import (
+    Bill,
+    BillItem,
+    Product,
+    Customer
+)
+
+from app.tools.preferences import get_preference
 
 
-# ============================================================
-# CREATE BILL
-# ============================================================
+MONEY_PLACES = Decimal("0.01")
+
+
+def money(value):
+    """
+    Convert a numeric value to Decimal rounded to 2 decimal places.
+    """
+    return Decimal(str(value)).quantize(
+        MONEY_PLACES,
+        rounding=ROUND_HALF_UP
+    )
+
+
+def calculate_item_amounts(quantity, unit_price, gst_rate):
+    """
+    Calculate taxable amount, GST and total amount.
+    """
+
+    quantity = Decimal(str(quantity))
+    unit_price = money(unit_price)
+    gst_rate = Decimal(str(gst_rate))
+
+    taxable_amount = money(
+        quantity * unit_price
+    )
+
+    gst_amount = money(
+        taxable_amount * gst_rate / Decimal("100")
+    )
+
+    total_amount = money(
+        taxable_amount + gst_amount
+    )
+
+    return {
+        "taxable_amount": taxable_amount,
+        "gst_amount": gst_amount,
+        "total_amount": total_amount
+    }
+
 
 def create_bill(customer_id=None):
+    """
+    Create a new draft bill.
+    """
+
     db = SessionLocal()
 
     try:
-        # Check customer if provided
+
+        begin_write_transaction(db)
+
+        customer = None
+
         if customer_id is not None:
+
             customer = (
                 db.query(Customer)
                 .filter(Customer.id == customer_id)
@@ -19,18 +78,22 @@ def create_bill(customer_id=None):
             )
 
             if not customer:
+
                 return {
                     "success": False,
-                    "message": f"Customer with ID {customer_id} not found."
+                    "message": (
+                        f"Customer #{customer_id} "
+                        "was not found."
+                    )
                 }
 
         bill = Bill(
             customer_id=customer_id,
             status="draft",
-            subtotal=0,
-            gst_amount=0,
-            total_amount=0,
-            payment_mode="cash"
+            subtotal=Decimal("0.00"),
+            gst_amount=Decimal("0.00"),
+            total_amount=Decimal("0.00"),
+            payment_mode=None
         )
 
         db.add(bill)
@@ -39,43 +102,77 @@ def create_bill(customer_id=None):
 
         return {
             "success": True,
-            "message": "Bill created successfully.",
             "bill_id": bill.id,
             "status": bill.status,
             "customer_id": bill.customer_id,
-            "subtotal": bill.subtotal,
-            "gst_amount": bill.gst_amount,
-            "total_amount": bill.total_amount
+            "message": (
+                f"Draft bill #{bill.id} created successfully."
+            )
         }
 
     except Exception as e:
+
         db.rollback()
 
         return {
             "success": False,
-            "message": f"Error creating bill: {str(e)}"
+            "message": (
+                f"Error creating bill: {str(e)}"
+            )
         }
 
     finally:
+
         db.close()
 
 
-# ============================================================
-# ADD ITEM TO BILL
-# ============================================================
+def _recalculate_bill(db, bill):
+    """
+    Recalculate bill subtotal, GST and total.
+    """
 
-def add_item_to_bill(bill_id, sku, quantity):
+    subtotal = Decimal("0.00")
+    gst_amount = Decimal("0.00")
+
+    for item in bill.items:
+
+        amounts = calculate_item_amounts(
+            item.quantity,
+            item.unit_price,
+            item.gst_rate
+        )
+
+        item.gst_amount = amounts["gst_amount"]
+        item.total_amount = amounts["total_amount"]
+
+        subtotal += amounts["taxable_amount"]
+        gst_amount += amounts["gst_amount"]
+
+    bill.subtotal = money(subtotal)
+    bill.gst_amount = money(gst_amount)
+
+    bill.total_amount = money(
+        subtotal + gst_amount
+    )
+
+
+def add_item_to_bill(
+    bill_id,
+    product_id,
+    quantity
+):
+    """
+    Add a product to a draft bill.
+
+    Stock is checked and overselling is prevented.
+    """
+
     db = SessionLocal()
 
     try:
-        # Validate quantity
-        if quantity <= 0:
-            return {
-                "success": False,
-                "message": "Quantity must be greater than zero."
-            }
 
-        # Find bill
+        begin_write_transaction(db)
+
         bill = (
             db.query(Bill)
             .filter(Bill.id == bill_id)
@@ -83,187 +180,205 @@ def add_item_to_bill(bill_id, sku, quantity):
         )
 
         if not bill:
+
             return {
                 "success": False,
-                "message": f"Bill with ID {bill_id} not found."
+                "message": (
+                    f"Bill #{bill_id} was not found."
+                )
             }
 
-        # Bill must be editable
         if bill.status != "draft":
+
             return {
                 "success": False,
-                "message": "Only draft bills can be modified."
+                "message": (
+                    f"Bill #{bill_id} is already "
+                    f"{bill.status} and cannot be edited."
+                )
             }
 
-        # Find product
+        try:
+            quantity = Decimal(str(quantity))
+        except Exception:
+
+            return {
+                "success": False,
+                "message": "Quantity must be a valid number."
+            }
+
+        if quantity <= 0:
+
+            return {
+                "success": False,
+                "message": (
+                    "Quantity must be greater than zero."
+                )
+            }
+
         product = (
             db.query(Product)
-            .filter(Product.sku == sku)
+            .filter(Product.id == product_id)
             .first()
         )
 
         if not product:
-            return {
-                "success": False,
-                "message": f"Product with SKU '{sku}' not found."
-            }
 
-        # Check stock availability
-        if quantity > product.quantity:
             return {
                 "success": False,
                 "message": (
-                    f"Insufficient stock for {product.name}. "
-                    f"Available: {product.quantity} {product.unit}"
+                    f"Product #{product_id} was not found."
                 )
             }
 
-        # Check if product already exists in this bill
+        if product.selling_price < product.cost_price:
+
+            return {
+                "success": False,
+                "message": (
+                    f"Product '{product.name}' has a selling "
+                    "price below cost price."
+                )
+            }
+
+        if product.selling_price > product.mrp:
+
+            return {
+                "success": False,
+                "message": (
+                    f"Product '{product.name}' has a selling "
+                    "price above MRP."
+                )
+            }
+
         existing_item = (
             db.query(BillItem)
             .filter(
                 BillItem.bill_id == bill_id,
-                BillItem.product_id == product.id
+                BillItem.product_id == product_id
             )
             .first()
         )
 
+        existing_quantity = Decimal("0")
+
         if existing_item:
-            new_quantity = existing_item.quantity + quantity
 
-            if new_quantity > product.quantity:
-                return {
-                    "success": False,
-                    "message": (
-                        f"Insufficient stock for {product.name}. "
-                        f"Available: {product.quantity} {product.unit}, "
-                        f"already requested: {existing_item.quantity}"
-                    )
-                }
-
-            existing_item.quantity = new_quantity
-
-            item_subtotal = (
-                existing_item.quantity *
-                existing_item.unit_price
+            existing_quantity = Decimal(
+                str(existing_item.quantity)
             )
 
-            existing_item.gst_amount = (
-                item_subtotal *
-                existing_item.gst_rate /
-                100
-            )
+        requested_total_quantity = (
+            existing_quantity + quantity
+        )
 
-            existing_item.total_amount = (
-                item_subtotal +
-                existing_item.gst_amount
-            )
+        available_stock = Decimal(
+            str(product.quantity)
+        )
 
-        else:
-            item_subtotal = (
-                quantity *
+        if requested_total_quantity > available_stock:
+
+            return {
+                "success": False,
+                "message": (
+                    f"Insufficient stock for '{product.name}'. "
+                    f"Available: {product.quantity} "
+                    f"{product.unit}. "
+                    f"Requested: {requested_total_quantity}."
+                )
+            }
+
+        if existing_item:
+
+            existing_item.quantity = requested_total_quantity
+
+            existing_item.unit_price = money(
                 product.selling_price
             )
 
-            gst_amount = (
-                item_subtotal *
-                product.gst_rate /
-                100
+            existing_item.gst_rate = Decimal(
+                str(product.gst_rate)
             )
 
-            total_amount = (
-                item_subtotal +
-                gst_amount
+        else:
+
+            amounts = calculate_item_amounts(
+                quantity,
+                product.selling_price,
+                product.gst_rate
             )
 
-            bill_item = BillItem(
-                bill_id=bill.id,
-                product_id=product.id,
+            existing_item = BillItem(
+                bill_id=bill_id,
+                product_id=product_id,
                 quantity=quantity,
-                unit_price=product.selling_price,
-                gst_rate=product.gst_rate,
-                gst_amount=gst_amount,
-                total_amount=total_amount
+                unit_price=money(
+                    product.selling_price
+                ),
+                gst_rate=Decimal(
+                    str(product.gst_rate)
+                ),
+                gst_amount=amounts["gst_amount"],
+                total_amount=amounts["total_amount"]
             )
 
-            db.add(bill_item)
+            db.add(existing_item)
 
-        # Flush changes
         db.flush()
 
-        # Recalculate entire bill
-        items = (
-            db.query(BillItem)
-            .filter(BillItem.bill_id == bill_id)
-            .all()
+        _recalculate_bill(
+            db,
+            bill
         )
 
-        subtotal = 0
-        gst_amount = 0
-
-        for item in items:
-
-            item_subtotal = (
-                item.quantity *
-                item.unit_price
-            )
-
-            item.gst_amount = (
-                item_subtotal *
-                item.gst_rate /
-                100
-            )
-
-            item.total_amount = (
-                item_subtotal +
-                item.gst_amount
-            )
-
-            subtotal += item_subtotal
-            gst_amount += item.gst_amount
-
-        bill.subtotal = subtotal
-        bill.gst_amount = gst_amount
-        bill.total_amount = subtotal + gst_amount
-
         db.commit()
-        db.refresh(bill)
 
         return {
             "success": True,
-            "message": "Item added to bill successfully.",
             "bill_id": bill.id,
-            "product": product.name,
-            "sku": product.sku,
-            "quantity": quantity,
-            "unit_price": product.selling_price,
-            "gst_rate": product.gst_rate,
-            "subtotal": bill.subtotal,
-            "gst_amount": bill.gst_amount,
-            "total_amount": bill.total_amount
+            "product_id": product.id,
+            "product_name": product.name,
+            "quantity_added": float(quantity),
+            "bill_subtotal": float(bill.subtotal),
+            "bill_gst": float(bill.gst_amount),
+            "bill_total": float(bill.total_amount),
+            "message": (
+                f"Added {quantity} {product.unit} "
+                f"of {product.name} to bill #{bill.id}."
+            )
         }
 
     except Exception as e:
+
         db.rollback()
 
         return {
             "success": False,
-            "message": f"Error adding item: {str(e)}"
+            "message": (
+                f"Error adding item to bill: {str(e)}"
+            )
         }
 
     finally:
+
         db.close()
 
 
-# ============================================================
-# FINALIZE BILL
-# ============================================================
+def update_bill_item(
+    bill_id,
+    product_id,
+    quantity
+):
+    """
+    Update quantity of an existing bill item.
+    """
 
-def finalize_bill(bill_id, payment_mode="cash"):
     db = SessionLocal()
 
     try:
-        # Find bill
+
+        begin_write_transaction(db)
+
         bill = (
             db.query(Bill)
             .filter(Bill.id == bill_id)
@@ -271,26 +386,256 @@ def finalize_bill(bill_id, payment_mode="cash"):
         )
 
         if not bill:
+
             return {
                 "success": False,
-                "message": f"Bill with ID {bill_id} not found."
+                "message": (
+                    f"Bill #{bill_id} was not found."
+                )
             }
 
-        # Prevent finalizing an already finalized bill
-        if bill.status == "finalized":
-            return {
-                "success": False,
-                "message": "Bill is already finalized."
-            }
-
-        # Only draft bills can be finalized
         if bill.status != "draft":
+
             return {
                 "success": False,
-                "message": "Only draft bills can be finalized."
+                "message": (
+                    f"Bill #{bill_id} cannot be edited "
+                    f"because it is {bill.status}."
+                )
             }
 
-        # Validate payment mode
+        try:
+            quantity = Decimal(str(quantity))
+        except Exception:
+
+            return {
+                "success": False,
+                "message": "Quantity must be a valid number."
+            }
+
+        item = (
+            db.query(BillItem)
+            .filter(
+                BillItem.bill_id == bill_id,
+                BillItem.product_id == product_id
+            )
+            .first()
+        )
+
+        if not item:
+
+            return {
+                "success": False,
+                "message": (
+                    "That product is not present "
+                    "in the bill."
+                )
+            }
+
+        if quantity <= 0:
+
+            db.delete(item)
+
+            db.flush()
+
+            _recalculate_bill(
+                db,
+                bill
+            )
+
+            db.commit()
+
+            return {
+                "success": True,
+                "bill_id": bill.id,
+                "message": (
+                    "Bill item removed because "
+                    "quantity was zero or negative."
+                )
+            }
+
+        product = (
+            db.query(Product)
+            .filter(Product.id == item.product_id)
+            .first()
+        )
+
+        if not product:
+
+            return {
+                "success": False,
+                "message": "Product no longer exists."
+            }
+
+        available_stock = Decimal(
+            str(product.quantity)
+        )
+
+        if quantity > available_stock:
+
+            return {
+                "success": False,
+                "message": (
+                    f"Insufficient stock for '{product.name}'. "
+                    f"Available: {product.quantity} "
+                    f"{product.unit}."
+                )
+            }
+
+        item.quantity = quantity
+        item.unit_price = money(
+            product.selling_price
+        )
+        item.gst_rate = Decimal(
+            str(product.gst_rate)
+        )
+
+        db.flush()
+
+        _recalculate_bill(
+            db,
+            bill
+        )
+
+        db.commit()
+
+        return {
+            "success": True,
+            "bill_id": bill.id,
+            "product_id": product.id,
+            "quantity": float(quantity),
+            "bill_subtotal": float(bill.subtotal),
+            "bill_gst": float(bill.gst_amount),
+            "bill_total": float(bill.total_amount),
+            "message": (
+                f"Updated bill #{bill.id}."
+            )
+        }
+
+    except Exception as e:
+
+        db.rollback()
+
+        return {
+            "success": False,
+            "message": (
+                f"Error updating bill: {str(e)}"
+            )
+        }
+
+    finally:
+
+        db.close()
+
+
+def _get_default_payment():
+    """
+    Read the persistent default payment preference.
+    """
+
+    result = get_preference(
+        "default_payment"
+    )
+
+    if (
+        result.get("success")
+        and result.get("found")
+        and result.get("preference_value")
+    ):
+
+        return result["preference_value"].lower()
+
+    return None
+
+
+def finalize_bill(
+    bill_id,
+    payment_mode=None
+):
+    """
+    Finalize a bill.
+
+    If payment_mode is not supplied, the persistent
+    default_payment preference is used.
+
+    Explicit payment mode always overrides the default.
+    """
+
+    db = SessionLocal()
+
+    try:
+
+        begin_write_transaction(db)
+
+        bill = (
+            db.query(Bill)
+            .filter(Bill.id == bill_id)
+            .first()
+        )
+
+        if not bill:
+
+            return {
+                "success": False,
+                "message": (
+                    f"Bill #{bill_id} was not found."
+                )
+            }
+
+        # --------------------------------------------------
+        # IDEMPOTENCY
+        # --------------------------------------------------
+
+        if bill.status == "finalized":
+
+            return {
+                "success": True,
+                "idempotent": True,
+                "bill_id": bill.id,
+                "payment_mode": bill.payment_mode,
+                "total_amount": float(
+                    bill.total_amount
+                ),
+                "message": (
+                    f"Bill #{bill.id} was already finalized. "
+                    "No additional stock was deducted."
+                )
+            }
+
+        if bill.status != "draft":
+
+            return {
+                "success": False,
+                "message": (
+                    f"Bill #{bill.id} cannot be finalized "
+                    f"because its status is {bill.status}."
+                )
+            }
+
+        # --------------------------------------------------
+        # PAYMENT MODE
+        # --------------------------------------------------
+
+        if payment_mode is None or not str(
+            payment_mode
+        ).strip():
+
+            payment_mode = _get_default_payment()
+
+        if payment_mode is None:
+
+            return {
+                "success": False,
+                "message": (
+                    "Payment mode was not provided and "
+                    "no default payment preference is saved."
+                )
+            }
+
+        payment_mode = str(
+            payment_mode
+        ).strip().lower()
+
         allowed_payment_modes = {
             "cash",
             "upi",
@@ -298,70 +643,69 @@ def finalize_bill(bill_id, payment_mode="cash"):
             "credit"
         }
 
-        payment_mode = payment_mode.lower()
-
         if payment_mode not in allowed_payment_modes:
+
             return {
                 "success": False,
                 "message": (
-                    f"Invalid payment mode. Allowed: "
-                    f"{', '.join(sorted(allowed_payment_modes))}"
+                    "Invalid payment mode. "
+                    "Allowed values: cash, upi, card, credit."
                 )
             }
 
-        # ====================================================
-        # CREDIT / KHATA VALIDATION
-        # ====================================================
+        # --------------------------------------------------
+        # EMPTY BILL
+        # --------------------------------------------------
+
+        if not bill.items:
+
+            return {
+                "success": False,
+                "message": (
+                    f"Bill #{bill.id} has no items."
+                )
+            }
+
+        # --------------------------------------------------
+        # CREDIT VALIDATION
+        # --------------------------------------------------
+
+        customer = None
 
         if payment_mode == "credit":
 
-            # Credit bill must have a customer
-            if bill.customer_id is None:
+            if not bill.customer_id:
+
                 return {
                     "success": False,
                     "message": (
-                        "A customer is required for "
-                        "credit/khata bills."
+                        "Credit payment requires a customer."
                     )
                 }
 
-            # Find customer
             customer = (
                 db.query(Customer)
-                .filter(Customer.id == bill.customer_id)
+                .filter(
+                    Customer.id == bill.customer_id
+                )
                 .first()
             )
 
             if not customer:
+
                 return {
                     "success": False,
                     "message": (
-                        f"Customer with ID "
-                        f"{bill.customer_id} not found."
+                        "Customer associated with "
+                        "the bill was not found."
                     )
                 }
 
-        # ====================================================
-        # GET BILL ITEMS
-        # ====================================================
+        # --------------------------------------------------
+        # RECHECK STOCK + PRICES
+        # --------------------------------------------------
 
-        items = (
-            db.query(BillItem)
-            .filter(BillItem.bill_id == bill_id)
-            .all()
-        )
-
-        if not items:
-            return {
-                "success": False,
-                "message": "Cannot finalize an empty bill."
-            }
-
-        # ====================================================
-        # RE-CHECK STOCK BEFORE DEDUCTION
-        # ====================================================
-
-        for item in items:
+        for item in bill.items:
 
             product = (
                 db.query(Product)
@@ -370,29 +714,73 @@ def finalize_bill(bill_id, payment_mode="cash"):
             )
 
             if not product:
+
                 return {
                     "success": False,
                     "message": (
-                        f"Product for bill item {item.id} "
-                        f"was not found."
+                        f"Product #{item.product_id} "
+                        "no longer exists."
                     )
                 }
 
-            if item.quantity > product.quantity:
+            requested_quantity = Decimal(
+                str(item.quantity)
+            )
+
+            available_quantity = Decimal(
+                str(product.quantity)
+            )
+
+            if requested_quantity > available_quantity:
+
                 return {
                     "success": False,
                     "message": (
-                        f"Insufficient stock for {product.name}. "
-                        f"Required: {item.quantity} {product.unit}, "
-                        f"Available: {product.quantity} {product.unit}"
+                        f"Cannot finalize bill #{bill.id}. "
+                        f"Insufficient stock for "
+                        f"'{product.name}'. "
+                        f"Available: {product.quantity} "
+                        f"{product.unit}, "
+                        f"required: {item.quantity}."
                     )
                 }
 
-        # ====================================================
+            if product.selling_price < product.cost_price:
+
+                return {
+                    "success": False,
+                    "message": (
+                        f"Cannot finalize bill because "
+                        f"'{product.name}' has a selling "
+                        "price below cost."
+                    )
+                }
+
+            if product.selling_price > product.mrp:
+
+                return {
+                    "success": False,
+                    "message": (
+                        f"Cannot finalize bill because "
+                        f"'{product.name}' has a selling "
+                        "price above MRP."
+                    )
+                }
+
+        # --------------------------------------------------
+        # FINAL RECALCULATION
+        # --------------------------------------------------
+
+        _recalculate_bill(
+            db,
+            bill
+        )
+
+        # --------------------------------------------------
         # DEDUCT STOCK
-        # ====================================================
+        # --------------------------------------------------
 
-        for item in items:
+        for item in bill.items:
 
             product = (
                 db.query(Product)
@@ -400,71 +788,108 @@ def finalize_bill(bill_id, payment_mode="cash"):
                 .first()
             )
 
-            product.quantity -= item.quantity
+            quantity = Decimal(
+                str(item.quantity)
+            )
 
-        # ====================================================
-        # UPDATE CUSTOMER KHATA BALANCE
-        # ====================================================
+            if Decimal(
+                str(product.quantity)
+            ) < quantity:
+
+                return {
+                    "success": False,
+                    "message": (
+                        f"Stock changed while finalizing "
+                        f"bill #{bill.id}. "
+                        "Transaction cancelled."
+                    )
+                }
+
+            product.quantity = (
+                Decimal(
+                    str(product.quantity)
+                ) - quantity
+            )
+
+            if product.quantity < 0:
+
+                return {
+                    "success": False,
+                    "message": (
+                        "Stock cannot become negative."
+                    )
+                }
+
+        # --------------------------------------------------
+        # CREDIT UPDATE
+        # --------------------------------------------------
 
         if payment_mode == "credit":
 
-            customer.credit_balance += bill.total_amount
+            customer.credit_balance = money(
+                Decimal(
+                    str(customer.credit_balance)
+                )
+                + Decimal(
+                    str(bill.total_amount)
+                )
+            )
 
-        # ====================================================
-        # UPDATE BILL
-        # ====================================================
+        # --------------------------------------------------
+        # FINALIZE
+        # --------------------------------------------------
 
         bill.status = "finalized"
         bill.payment_mode = payment_mode
 
         db.commit()
-        db.refresh(bill)
 
         return {
             "success": True,
-            "message": "Bill finalized successfully.",
+            "idempotent": False,
             "bill_id": bill.id,
             "status": bill.status,
-            "payment_mode": bill.payment_mode,
-            "customer_id": bill.customer_id,
-            "credit_added": (
-                bill.total_amount
-                if payment_mode == "credit"
-                else 0
+            "payment_mode": payment_mode,
+            "subtotal": float(
+                bill.subtotal
             ),
-            "subtotal": bill.subtotal,
-            "gst_amount": bill.gst_amount,
-            "total_amount": bill.total_amount
+            "gst_amount": float(
+                bill.gst_amount
+            ),
+            "total_amount": float(
+                bill.total_amount
+            ),
+            "message": (
+                f"Bill #{bill.id} finalized successfully "
+                f"using {payment_mode.upper()}."
+            )
         }
 
     except Exception as e:
+
         db.rollback()
 
         return {
             "success": False,
-            "message": f"Error finalizing bill: {str(e)}"
+            "message": (
+                f"Error finalizing bill: {str(e)}"
+            )
         }
 
     finally:
+
         db.close()
 
 
-# ============================================================
-# UPDATE BILL ITEM
-# ============================================================
+def get_bill(bill_id):
+    """
+    Retrieve complete bill information.
+    """
 
-def update_bill_item(bill_id, sku, quantity):
     db = SessionLocal()
 
     try:
-        # Validate quantity
-        if quantity < 0:
-            return {
-                "success": False,
-                "message": "Quantity cannot be negative."
-            }
 
-        # Find bill
         bill = (
             db.query(Bill)
             .filter(Bill.id == bill_id)
@@ -472,169 +897,17 @@ def update_bill_item(bill_id, sku, quantity):
         )
 
         if not bill:
-            return {
-                "success": False,
-                "message": f"Bill with ID {bill_id} not found."
-            }
 
-        # Only draft bills can be edited
-        if bill.status != "draft":
-            return {
-                "success": False,
-                "message": "Only draft bills can be edited."
-            }
-
-        # Find product
-        product = (
-            db.query(Product)
-            .filter(Product.sku == sku)
-            .first()
-        )
-
-        if not product:
-            return {
-                "success": False,
-                "message": f"Product with SKU '{sku}' not found."
-            }
-
-        # Find bill item
-        bill_item = (
-            db.query(BillItem)
-            .filter(
-                BillItem.bill_id == bill_id,
-                BillItem.product_id == product.id
-            )
-            .first()
-        )
-
-        if not bill_item:
             return {
                 "success": False,
                 "message": (
-                    f"{product.name} is not present in this bill."
+                    f"Bill #{bill_id} was not found."
                 )
             }
 
-        # ====================================================
-        # QUANTITY = 0 MEANS REMOVE ITEM
-        # ====================================================
+        items = []
 
-        if quantity == 0:
-
-            db.delete(bill_item)
-
-        else:
-
-            # Check stock
-            if quantity > product.quantity:
-                return {
-                    "success": False,
-                    "message": (
-                        f"Insufficient stock for {product.name}. "
-                        f"Available: {product.quantity} {product.unit}"
-                    )
-                }
-
-            bill_item.quantity = quantity
-
-        # ====================================================
-        # RECALCULATE BILL TOTALS
-        # ====================================================
-
-        db.flush()
-
-        items = (
-            db.query(BillItem)
-            .filter(BillItem.bill_id == bill_id)
-            .all()
-        )
-
-        subtotal = 0
-        gst_amount = 0
-
-        for item in items:
-
-            item_subtotal = (
-                item.quantity *
-                item.unit_price
-            )
-
-            item.gst_amount = (
-                item_subtotal *
-                item.gst_rate /
-                100
-            )
-
-            item.total_amount = (
-                item_subtotal +
-                item.gst_amount
-            )
-
-            subtotal += item_subtotal
-            gst_amount += item.gst_amount
-
-        bill.subtotal = subtotal
-        bill.gst_amount = gst_amount
-        bill.total_amount = subtotal + gst_amount
-
-        db.commit()
-        db.refresh(bill)
-
-        return {
-            "success": True,
-            "message": "Bill item updated successfully.",
-            "bill_id": bill.id,
-            "product": product.name,
-            "sku": product.sku,
-            "quantity": quantity,
-            "subtotal": bill.subtotal,
-            "gst_amount": bill.gst_amount,
-            "total_amount": bill.total_amount
-        }
-
-    except Exception as e:
-        db.rollback()
-
-        return {
-            "success": False,
-            "message": f"Error updating bill item: {str(e)}"
-        }
-
-    finally:
-        db.close()
-
-
-# ============================================================
-# GET BILL
-# ============================================================
-
-def get_bill(bill_id):
-    db = SessionLocal()
-
-    try:
-        # Find bill
-        bill = (
-            db.query(Bill)
-            .filter(Bill.id == bill_id)
-            .first()
-        )
-
-        if not bill:
-            return {
-                "success": False,
-                "message": f"Bill with ID {bill_id} not found."
-            }
-
-        # Get bill items
-        items = (
-            db.query(BillItem)
-            .filter(BillItem.bill_id == bill_id)
-            .all()
-        )
-
-        bill_items = []
-
-        for item in items:
+        for item in bill.items:
 
             product = (
                 db.query(Product)
@@ -642,18 +915,67 @@ def get_bill(bill_id):
                 .first()
             )
 
-            if not product:
-                continue
+            gst_amount = money(
+                item.gst_amount
+            )
 
-            bill_items.append({
-                "product": product.name,
-                "sku": product.sku,
-                "quantity": item.quantity,
-                "unit": product.unit,
-                "unit_price": item.unit_price,
-                "gst_rate": item.gst_rate,
-                "gst_amount": item.gst_amount,
-                "total_amount": item.total_amount
+            cgst_amount = money(
+                gst_amount / Decimal("2")
+            )
+
+            sgst_amount = money(
+                gst_amount / Decimal("2")
+            )
+
+            items.append({
+                "item_id": item.id,
+                "product_id": item.product_id,
+                "product_name": (
+                    product.name
+                    if product
+                    else "Unknown Product"
+                ),
+                "sku": (
+                    product.sku
+                    if product
+                    else None
+                ),
+                "unit": (
+                    product.unit
+                    if product
+                    else None
+                ),
+                "quantity": float(
+                    item.quantity
+                ),
+                "unit_price": float(
+                    item.unit_price
+                ),
+                "gst_rate": float(
+                    item.gst_rate
+                ),
+                "taxable_amount": float(
+                    money(
+                        Decimal(
+                            str(item.quantity)
+                        )
+                        * Decimal(
+                            str(item.unit_price)
+                        )
+                    )
+                ),
+                "cgst_amount": float(
+                    cgst_amount
+                ),
+                "sgst_amount": float(
+                    sgst_amount
+                ),
+                "gst_amount": float(
+                    gst_amount
+                ),
+                "total_amount": float(
+                    item.total_amount
+                )
             })
 
         return {
@@ -662,23 +984,27 @@ def get_bill(bill_id):
             "status": bill.status,
             "customer_id": bill.customer_id,
             "payment_mode": bill.payment_mode,
-            "items": bill_items,
-            "subtotal": bill.subtotal,
-            "gst_amount": bill.gst_amount,
-            "total_amount": bill.total_amount,
-            "created_at": (
-                bill.created_at.isoformat()
-                if bill.created_at
-                else None
-            )
+            "subtotal": float(
+                bill.subtotal
+            ),
+            "gst_amount": float(
+                bill.gst_amount
+            ),
+            "total_amount": float(
+                bill.total_amount
+            ),
+            "items": items
         }
 
     except Exception as e:
 
         return {
             "success": False,
-            "message": f"Error retrieving bill: {str(e)}"
+            "message": (
+                f"Error retrieving bill: {str(e)}"
+            )
         }
 
     finally:
+
         db.close()

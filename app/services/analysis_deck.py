@@ -1,697 +1,743 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal
 
-import matplotlib.pyplot as plt
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.chart.data import ChartData
+from pptx.enum.chart import XL_CHART_TYPE
 from pptx.enum.text import PP_ALIGN
+from pptx.util import Inches, Pt
 
 from app.database.db import SessionLocal
-from app.database.models import Bill, BillItem, Product
+from app.database.models import (
+    Bill,
+    BillItem,
+    Product
+)
 
-
-STORE_NAME = "NEBULA SUPERMARKET"
 
 GENERATED_DIR = "generated"
-CHART_DIR = os.path.join(GENERATED_DIR, "charts")
 
 
-def format_money(amount):
-    if amount is None:
-        amount = 0.0
-
-    return f"₹{float(amount):,.2f}"
-
-
-def add_title(slide, title, subtitle=None):
+def _date_range(days):
     """
-    Add a title to a slide.
+    Return start and end timestamps.
     """
 
-    title_box = slide.shapes.add_textbox(
+    end = datetime.now()
+    start = end - timedelta(days=days)
+
+    return start, end
+
+
+def _get_finalized_bills(
+    db,
+    start,
+    end
+):
+    """
+    Retrieve finalized bills in date range.
+    """
+
+    return (
+        db.query(Bill)
+        .filter(
+            Bill.status == "finalized",
+            Bill.created_at >= start,
+            Bill.created_at <= end
+        )
+        .order_by(Bill.created_at.asc())
+        .all()
+    )
+
+
+def _calculate_sales_data(bills):
+    """
+    Calculate sales metrics.
+    """
+
+    total_sales = Decimal("0.00")
+    total_gst = Decimal("0.00")
+
+    payment_totals = {
+        "cash": Decimal("0.00"),
+        "upi": Decimal("0.00"),
+        "card": Decimal("0.00"),
+        "credit": Decimal("0.00")
+    }
+
+    daily_sales = {}
+
+    for bill in bills:
+
+        total = Decimal(
+            str(bill.total_amount)
+        )
+
+        gst = Decimal(
+            str(bill.gst_amount)
+        )
+
+        total_sales += total
+        total_gst += gst
+
+        payment_mode = (
+            bill.payment_mode
+            or "unknown"
+        ).lower()
+
+        if payment_mode in payment_totals:
+
+            payment_totals[payment_mode] += total
+
+        date_key = bill.created_at.strftime(
+            "%Y-%m-%d"
+        )
+
+        daily_sales.setdefault(
+            date_key,
+            Decimal("0.00")
+        )
+
+        daily_sales[date_key] += total
+
+    return {
+        "total_sales": total_sales,
+        "total_gst": total_gst,
+        "payment_totals": payment_totals,
+        "daily_sales": daily_sales
+    }
+
+
+def _get_top_products(
+    db,
+    bills
+):
+    """
+    Find top-selling products by quantity.
+    """
+
+    quantities = {}
+
+    for bill in bills:
+
+        for item in bill.items:
+
+            product = (
+                db.query(Product)
+                .filter(
+                    Product.id == item.product_id
+                )
+                .first()
+            )
+
+            if not product:
+                continue
+
+            name = product.name
+
+            quantities.setdefault(
+                name,
+                Decimal("0")
+            )
+
+            quantities[name] += Decimal(
+                str(item.quantity)
+            )
+
+    return sorted(
+        quantities.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[:10]
+
+
+def _get_inventory_data(db):
+    """
+    Calculate inventory health.
+    """
+
+    products = (
+        db.query(Product)
+        .order_by(Product.name.asc())
+        .all()
+    )
+
+    healthy = 0
+    low = 0
+    out_of_stock = 0
+
+    for product in products:
+
+        quantity = Decimal(
+            str(product.quantity)
+        )
+
+        reorder_level = Decimal(
+            str(product.reorder_level)
+        )
+
+        if quantity <= 0:
+
+            out_of_stock += 1
+
+        elif quantity <= reorder_level:
+
+            low += 1
+
+        else:
+
+            healthy += 1
+
+    return {
+        "healthy": healthy,
+        "low": low,
+        "out_of_stock": out_of_stock,
+        "total": len(products)
+    }
+
+
+def _add_title(slide, title):
+    """
+    Add slide title.
+    """
+
+    textbox = slide.shapes.add_textbox(
         Inches(0.6),
-        Inches(0.3),
+        Inches(0.25),
         Inches(12),
         Inches(0.7)
     )
 
-    title_frame = title_box.text_frame
-    title_frame.clear()
+    frame = textbox.text_frame
 
-    paragraph = title_frame.paragraphs[0]
+    paragraph = frame.paragraphs[0]
+
     paragraph.text = title
-    paragraph.font.size = Pt(26)
+    paragraph.font.size = Pt(24)
     paragraph.font.bold = True
 
-    if subtitle:
-        subtitle_box = slide.shapes.add_textbox(
-            Inches(0.6),
-            Inches(1.0),
-            Inches(12),
-            Inches(0.4)
-        )
 
-        subtitle_frame = subtitle_box.text_frame
-        subtitle_frame.clear()
-
-        paragraph = subtitle_frame.paragraphs[0]
-        paragraph.text = subtitle
-        paragraph.font.size = Pt(12)
-
-
-def add_text_box(slide, text, left, top, width, height, font_size=18):
+def _add_footer(slide):
     """
-    Add a normal text box.
+    Add footer.
     """
 
-    box = slide.shapes.add_textbox(
+    textbox = slide.shapes.add_textbox(
+        Inches(0.6),
+        Inches(7.05),
+        Inches(12),
+        Inches(0.25)
+    )
+
+    paragraph = (
+        textbox
+        .text_frame
+        .paragraphs[0]
+    )
+
+    paragraph.text = (
+        "Generated by Nebula Supermarket Ops Agent"
+    )
+
+    paragraph.font.size = Pt(8)
+    paragraph.alignment = PP_ALIGN.CENTER
+
+
+def _add_bullet_text(
+    slide,
+    lines,
+    left=0.8,
+    top=1.4,
+    width=11.5,
+    height=4.8
+):
+    """
+    Add bullet list.
+    """
+
+    textbox = slide.shapes.add_textbox(
         Inches(left),
         Inches(top),
         Inches(width),
         Inches(height)
     )
 
-    frame = box.text_frame
-    frame.word_wrap = True
+    frame = textbox.text_frame
     frame.clear()
 
-    paragraph = frame.paragraphs[0]
-    paragraph.text = text
-    paragraph.font.size = Pt(font_size)
+    for index, line in enumerate(lines):
 
-    return box
+        if index == 0:
+
+            paragraph = frame.paragraphs[0]
+
+        else:
+
+            paragraph = frame.add_paragraph()
+
+        paragraph.text = line
+        paragraph.font.size = Pt(18)
+        paragraph.space_after = Pt(12)
 
 
-def create_payment_chart(payment_data):
+def generate_analysis_deck(days=7):
     """
-    Create payment-mode chart.
-    """
-
-    os.makedirs(CHART_DIR, exist_ok=True)
-
-    labels = []
-    values = []
-
-    for mode, amount in payment_data.items():
-        labels.append(mode.upper())
-        values.append(float(amount))
-
-    chart_path = os.path.join(
-        CHART_DIR,
-        "payment_analysis.png"
-    )
-
-    plt.figure(figsize=(8, 5))
-
-    if any(values):
-        plt.bar(labels, values)
-
-    plt.title("Sales by Payment Mode")
-    plt.xlabel("Payment Mode")
-    plt.ylabel("Sales Amount (INR)")
-    plt.tight_layout()
-
-    plt.savefig(chart_path, dpi=150)
-    plt.close()
-
-    return chart_path
-
-
-def create_inventory_chart(inventory_data):
-    """
-    Create inventory stock chart.
-    """
-
-    os.makedirs(CHART_DIR, exist_ok=True)
-
-    names = []
-    quantities = []
-
-    for item in inventory_data[:10]:
-        names.append(item["name"])
-        quantities.append(float(item["quantity"]))
-
-    chart_path = os.path.join(
-        CHART_DIR,
-        "inventory_analysis.png"
-    )
-
-    plt.figure(figsize=(9, 5))
-
-    if quantities:
-        plt.bar(names, quantities)
-
-    plt.title("Current Inventory - Top Products")
-    plt.xlabel("Product")
-    plt.ylabel("Stock Quantity")
-
-    plt.xticks(
-        rotation=35,
-        ha="right"
-    )
-
-    plt.tight_layout()
-
-    plt.savefig(chart_path, dpi=150)
-    plt.close()
-
-    return chart_path
-
-
-def generate_business_insights(
-    total_sales,
-    total_bills,
-    average_bill,
-    credit_sales,
-    low_stock_count,
-    total_products
-):
-    """
-    Generate simple business insights from database values.
-    """
-
-    insights = []
-
-    if total_sales > 0:
-        insights.append(
-            f"Total finalized sales are {format_money(total_sales)}."
-        )
-    else:
-        insights.append(
-            "No finalized sales are available for the analysis period."
-        )
-
-    if total_bills > 0:
-        insights.append(
-            f"The supermarket processed {total_bills} finalized bill(s) "
-            f"with an average bill value of {format_money(average_bill)}."
-        )
-
-    if credit_sales > 0:
-        insights.append(
-            f"Credit sales amount to {format_money(credit_sales)}, "
-            "so khata balances should be monitored."
-        )
-    else:
-        insights.append(
-            "There are currently no credit sales in the analysis period."
-        )
-
-    if low_stock_count > 0:
-        insights.append(
-            f"{low_stock_count} product(s) are at or below their "
-            "reorder level and should be reviewed."
-        )
-    else:
-        insights.append(
-            "No products are currently below their reorder threshold."
-        )
-
-    if total_products > 0:
-        insights.append(
-            f"The inventory currently contains {total_products} "
-            "product SKU(s)."
-        )
-
-    return insights
-
-
-def generate_analysis_deck():
-    """
-    Generate a PowerPoint business analysis deck.
+    Generate a PowerPoint business analysis deck
+    with real PowerPoint charts.
     """
 
     db = SessionLocal()
 
     try:
-        os.makedirs(GENERATED_DIR, exist_ok=True)
-        os.makedirs(CHART_DIR, exist_ok=True)
 
-        # --------------------------------------------------
-        # SALES DATA
-        # --------------------------------------------------
-
-        finalized_bills = (
-            db.query(Bill)
-            .filter(Bill.status == "finalized")
-            .all()
+        os.makedirs(
+            GENERATED_DIR,
+            exist_ok=True
         )
 
-        total_bills = len(finalized_bills)
-
-        total_subtotal = sum(
-            float(bill.subtotal or 0)
-            for bill in finalized_bills
+        start, end = _date_range(
+            days
         )
 
-        total_gst = sum(
-            float(bill.gst_amount or 0)
-            for bill in finalized_bills
+        bills = _get_finalized_bills(
+            db,
+            start,
+            end
         )
 
-        total_sales = sum(
-            float(bill.total_amount or 0)
-            for bill in finalized_bills
+        sales_data = _calculate_sales_data(
+            bills
         )
 
-        average_bill = (
-            total_sales / total_bills
-            if total_bills > 0
-            else 0
+        top_products = _get_top_products(
+            db,
+            bills
         )
 
-        # --------------------------------------------------
-        # PAYMENT ANALYSIS
-        # --------------------------------------------------
-
-        payment_data = {
-            "cash": 0,
-            "upi": 0,
-            "card": 0,
-            "credit": 0
-        }
-
-        payment_bill_counts = {
-            "cash": 0,
-            "upi": 0,
-            "card": 0,
-            "credit": 0
-        }
-
-        for bill in finalized_bills:
-
-            mode = (bill.payment_mode or "cash").lower()
-
-            amount = float(
-                bill.total_amount or 0
-            )
-
-            if mode not in payment_data:
-                payment_data[mode] = 0
-                payment_bill_counts[mode] = 0
-
-            payment_data[mode] += amount
-            payment_bill_counts[mode] += 1
-
-        # --------------------------------------------------
-        # INVENTORY ANALYSIS
-        # --------------------------------------------------
-
-        products = (
-            db.query(Product)
-            .order_by(Product.quantity.asc())
-            .all()
+        inventory = _get_inventory_data(
+            db
         )
 
-        total_products = len(products)
+        prs = Presentation()
 
-        low_stock_products = [
-            product
-            for product in products
-            if product.quantity <= product.reorder_level
+        # ==================================================
+        # SLIDE 1 — TITLE
+        # ==================================================
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        textbox = slide.shapes.add_textbox(
+            Inches(1),
+            Inches(2.1),
+            Inches(11),
+            Inches(1.2)
+        )
+
+        paragraph = (
+            textbox
+            .text_frame
+            .paragraphs[0]
+        )
+
+        paragraph.text = (
+            "NEBULA SUPERMARKET"
+        )
+
+        paragraph.font.size = Pt(34)
+        paragraph.font.bold = True
+        paragraph.alignment = PP_ALIGN.CENTER
+
+        textbox2 = slide.shapes.add_textbox(
+            Inches(1),
+            Inches(3.4),
+            Inches(11),
+            Inches(1)
+        )
+
+        paragraph2 = (
+            textbox2
+            .text_frame
+            .paragraphs[0]
+        )
+
+        paragraph2.text = (
+            f"{days}-Day Business Analysis"
+        )
+
+        paragraph2.font.size = Pt(24)
+        paragraph2.alignment = PP_ALIGN.CENTER
+
+        _add_footer(slide)
+
+        # ==================================================
+        # SLIDE 2 — SALES SUMMARY
+        # ==================================================
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        _add_title(
+            slide,
+            "Sales Summary"
+        )
+
+        avg_bill = (
+            sales_data["total_sales"]
+            / len(bills)
+            if bills
+            else Decimal("0.00")
+        )
+
+        lines = [
+            f"Total sales: ₹{sales_data['total_sales']:.2f}",
+            f"GST collected: ₹{sales_data['total_gst']:.2f}",
+            f"Number of bills: {len(bills)}",
+            f"Average bill value: ₹{avg_bill:.2f}",
+            f"Products tracked: {inventory['total']}",
+            f"Low-stock products: {inventory['low']}",
+            f"Out-of-stock products: {inventory['out_of_stock']}"
         ]
 
-        low_stock_count = len(low_stock_products)
-
-        inventory_data = []
-
-        for product in products:
-            inventory_data.append({
-                "name": product.name,
-                "sku": product.sku,
-                "quantity": product.quantity,
-                "unit": product.unit,
-                "reorder_level": product.reorder_level,
-                "selling_price": product.selling_price
-            })
-
-        # --------------------------------------------------
-        # CREDIT ANALYSIS
-        # --------------------------------------------------
-
-        credit_sales = payment_data.get(
-            "credit",
-            0
-        )
-
-        # --------------------------------------------------
-        # CREATE CHARTS
-        # --------------------------------------------------
-
-        payment_chart = create_payment_chart(
-            payment_data
-        )
-
-        inventory_chart = create_inventory_chart(
-            inventory_data
-        )
-
-        # --------------------------------------------------
-        # CREATE POWERPOINT
-        # --------------------------------------------------
-
-        presentation = Presentation()
-
-        presentation.slide_width = Inches(13.333)
-        presentation.slide_height = Inches(7.5)
-
-        # --------------------------------------------------
-        # SLIDE 1 - TITLE
-        # --------------------------------------------------
-
-        slide = presentation.slides.add_slide(
-            presentation.slide_layouts[6]
-        )
-
-        add_text_box(
+        _add_bullet_text(
             slide,
-            STORE_NAME,
-            0.8,
-            2.2,
-            11.7,
-            1.0,
-            32
+            lines
         )
 
-        add_text_box(
+        _add_footer(slide)
+
+        # ==================================================
+        # SLIDE 3 — DAILY SALES CHART
+        # ==================================================
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        _add_title(
             slide,
-            "Business Analysis & Operations Report",
-            0.8,
-            3.2,
-            11.7,
-            0.7,
-            24
+            "Daily Sales"
         )
 
-        add_text_box(
-            slide,
-            datetime.now().strftime(
-                "Generated on %d-%m-%Y %I:%M %p"
-            ),
-            0.8,
-            4.2,
-            11.7,
-            0.5,
-            14
-        )
+        chart_data = ChartData()
 
-        # --------------------------------------------------
-        # SLIDE 2 - SALES SUMMARY
-        # --------------------------------------------------
+        daily = sales_data[
+            "daily_sales"
+        ]
 
-        slide = presentation.slides.add_slide(
-            presentation.slide_layouts[6]
-        )
+        if daily:
 
-        add_title(
-            slide,
-            "Sales Summary",
-            "Finalized bills currently stored in the supermarket database"
-        )
-
-        sales_text = (
-            f"Total Bills: {total_bills}\n\n"
-            f"Total Subtotal: {format_money(total_subtotal)}\n\n"
-            f"Total GST: {format_money(total_gst)}\n\n"
-            f"Total Sales: {format_money(total_sales)}\n\n"
-            f"Average Bill Value: {format_money(average_bill)}"
-        )
-
-        add_text_box(
-            slide,
-            sales_text,
-            1.0,
-            1.7,
-            11,
-            4.5,
-            22
-        )
-
-        # --------------------------------------------------
-        # SLIDE 3 - PAYMENT ANALYSIS
-        # --------------------------------------------------
-
-        slide = presentation.slides.add_slide(
-            presentation.slide_layouts[6]
-        )
-
-        add_title(
-            slide,
-            "Payment Mode Analysis"
-        )
-
-        slide.shapes.add_picture(
-            payment_chart,
-            Inches(0.8),
-            Inches(1.4),
-            width=Inches(7.0)
-        )
-
-        payment_text = "Payment Breakdown\n\n"
-
-        for mode in payment_data:
-
-            payment_text += (
-                f"{mode.upper()}: "
-                f"{format_money(payment_data[mode])} "
-                f"({payment_bill_counts.get(mode, 0)} bill(s))\n\n"
+            chart_data.categories = list(
+                daily.keys()
             )
 
-        add_text_box(
-            slide,
-            payment_text,
-            8.1,
-            1.6,
-            4.5,
-            4.5,
-            16
-        )
-
-        # --------------------------------------------------
-        # SLIDE 4 - INVENTORY
-        # --------------------------------------------------
-
-        slide = presentation.slides.add_slide(
-            presentation.slide_layouts[6]
-        )
-
-        add_title(
-            slide,
-            "Inventory Analysis",
-            "Products with the lowest stock levels are shown first"
-        )
-
-        slide.shapes.add_picture(
-            inventory_chart,
-            Inches(0.5),
-            Inches(1.4),
-            width=Inches(8.0)
-        )
-
-        inventory_text = (
-            f"Total Product SKUs: {total_products}\n\n"
-            f"Low Stock Products: {low_stock_count}\n\n"
-        )
-
-        if low_stock_products:
-
-            inventory_text += "Reorder Candidates:\n\n"
-
-            for product in low_stock_products[:5]:
-
-                inventory_text += (
-                    f"• {product.name}: "
-                    f"{product.quantity} {product.unit}\n"
-                )
+            chart_data.add_series(
+                "Sales",
+                [
+                    float(value)
+                    for value in daily.values()
+                ]
+            )
 
         else:
 
-            inventory_text += (
-                "No products currently require reordering."
-            )
-
-        add_text_box(
-            slide,
-            inventory_text,
-            8.7,
-            1.6,
-            4.0,
-            4.8,
-            15
-        )
-
-        # --------------------------------------------------
-        # SLIDE 5 - PRODUCT STOCK TABLE
-        # --------------------------------------------------
-
-        slide = presentation.slides.add_slide(
-            presentation.slide_layouts[6]
-        )
-
-        add_title(
-            slide,
-            "Current Inventory Snapshot"
-        )
-
-        rows_to_show = products[:10]
-
-        headers = [
-            "Product",
-            "SKU",
-            "Stock",
-            "Unit",
-            "Reorder Level"
-        ]
-
-        rows = len(rows_to_show) + 1
-        cols = len(headers)
-
-        table = slide.shapes.add_table(
-            rows,
-            cols,
-            Inches(0.5),
-            Inches(1.4),
-            Inches(12.3),
-            Inches(5.2)
-        ).table
-
-        widths = [
-            3.8,
-            2.0,
-            1.5,
-            1.5,
-            2.5
-        ]
-
-        for index, width in enumerate(widths):
-            table.columns[index].width = Inches(width)
-
-        for col_index, header in enumerate(headers):
-
-            cell = table.cell(0, col_index)
-
-            cell.text = header
-
-            for paragraph in cell.text_frame.paragraphs:
-                paragraph.font.bold = True
-                paragraph.font.size = Pt(13)
-                paragraph.alignment = PP_ALIGN.CENTER
-
-        for row_index, product in enumerate(
-            rows_to_show,
-            start=1
-        ):
-
-            values = [
-                product.name,
-                product.sku,
-                str(product.quantity),
-                product.unit,
-                str(product.reorder_level)
+            chart_data.categories = [
+                "No sales"
             ]
 
-            for col_index, value in enumerate(values):
+            chart_data.add_series(
+                "Sales",
+                [0]
+            )
 
-                cell = table.cell(
-                    row_index,
-                    col_index
-                )
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.COLUMN_CLUSTERED,
+            Inches(0.8),
+            Inches(1.3),
+            Inches(11.5),
+            Inches(5.2),
+            chart_data
+        ).chart
 
-                cell.text = value
-
-                for paragraph in cell.text_frame.paragraphs:
-                    paragraph.font.size = Pt(11)
-                    paragraph.alignment = PP_ALIGN.CENTER
-
-        # --------------------------------------------------
-        # SLIDE 6 - BUSINESS INSIGHTS
-        # --------------------------------------------------
-
-        slide = presentation.slides.add_slide(
-            presentation.slide_layouts[6]
+        chart.has_legend = False
+        chart.has_title = True
+        chart.chart_title.text_frame.text = (
+            "Sales by Day"
         )
 
-        add_title(
+        chart.value_axis.has_major_gridlines = True
+
+        _add_footer(slide)
+
+        # ==================================================
+        # SLIDE 4 — PAYMENT CHART
+        # ==================================================
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        _add_title(
+            slide,
+            "Payment Mode Breakdown"
+        )
+
+        payment_data = ChartData()
+
+        payment_data.categories = [
+            "Cash",
+            "UPI",
+            "Card",
+            "Credit"
+        ]
+
+        payment_data.add_series(
+            "Amount",
+            [
+                float(
+                    sales_data["payment_totals"]["cash"]
+                ),
+                float(
+                    sales_data["payment_totals"]["upi"]
+                ),
+                float(
+                    sales_data["payment_totals"]["card"]
+                ),
+                float(
+                    sales_data["payment_totals"]["credit"]
+                )
+            ]
+        )
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.PIE,
+            Inches(2),
+            Inches(1.4),
+            Inches(8.5),
+            Inches(5),
+            payment_data
+        ).chart
+
+        chart.has_legend = True
+        chart.has_title = True
+        chart.chart_title.text_frame.text = (
+            "Sales by Payment Mode"
+        )
+
+        _add_footer(slide)
+
+        # ==================================================
+        # SLIDE 5 — TOP PRODUCTS
+        # ==================================================
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        _add_title(
+            slide,
+            "Top Selling Products"
+        )
+
+        product_data = ChartData()
+
+        if top_products:
+
+            product_data.categories = [
+                item[0]
+                for item in top_products
+            ]
+
+            product_data.add_series(
+                "Quantity",
+                [
+                    float(item[1])
+                    for item in top_products
+                ]
+            )
+
+        else:
+
+            product_data.categories = [
+                "No sales"
+            ]
+
+            product_data.add_series(
+                "Quantity",
+                [0]
+            )
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.BAR_CLUSTERED,
+            Inches(1),
+            Inches(1.2),
+            Inches(11),
+            Inches(5.5),
+            product_data
+        ).chart
+
+        chart.has_legend = False
+        chart.has_title = True
+        chart.chart_title.text_frame.text = (
+            "Top Products by Quantity Sold"
+        )
+
+        _add_footer(slide)
+
+        # ==================================================
+        # SLIDE 6 — INVENTORY HEALTH
+        # ==================================================
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        _add_title(
+            slide,
+            "Inventory Health"
+        )
+
+        inventory_data = ChartData()
+
+        inventory_data.categories = [
+            "Healthy",
+            "Low Stock",
+            "Out of Stock"
+        ]
+
+        inventory_data.add_series(
+            "Products",
+            [
+                inventory["healthy"],
+                inventory["low"],
+                inventory["out_of_stock"]
+            ]
+        )
+
+        chart = slide.shapes.add_chart(
+            XL_CHART_TYPE.DOUGHNUT,
+            Inches(2),
+            Inches(1.4),
+            Inches(8.5),
+            Inches(5),
+            inventory_data
+        ).chart
+
+        chart.has_legend = True
+        chart.has_title = True
+        chart.chart_title.text_frame.text = (
+            "Inventory Status"
+        )
+
+        _add_footer(slide)
+
+        # ==================================================
+        # SLIDE 7 — INSIGHTS
+        # ==================================================
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+        _add_title(
             slide,
             "Business Insights"
         )
 
-        insights = generate_business_insights(
-            total_sales,
-            total_bills,
-            average_bill,
-            credit_sales,
-            low_stock_count,
-            total_products
-        )
+        insights = []
 
-        insight_text = ""
+        if inventory["out_of_stock"] > 0:
 
-        for index, insight in enumerate(
-            insights,
-            start=1
-        ):
-
-            insight_text += (
-                f"{index}. {insight}\n\n"
+            insights.append(
+                f"{inventory['out_of_stock']} "
+                "products are out of stock and need replenishment."
             )
 
-        add_text_box(
+        if inventory["low"] > 0:
+
+            insights.append(
+                f"{inventory['low']} products are at or below "
+                "their reorder level."
+            )
+
+        if top_products:
+
+            insights.append(
+                f"Top-selling product: "
+                f"{top_products[0][0]}."
+            )
+
+        if sales_data["total_sales"] > 0:
+
+            insights.append(
+                f"Total revenue for the selected period "
+                f"was ₹{sales_data['total_sales']:.2f}."
+            )
+
+            insights.append(
+                f"GST collected was "
+                f"₹{sales_data['total_gst']:.2f}."
+            )
+
+        if not insights:
+
+            insights.append(
+                "No finalized sales were recorded "
+                "during the selected period."
+            )
+
+        _add_bullet_text(
             slide,
-            insight_text,
-            0.9,
-            1.5,
-            11.5,
-            5.0,
-            20
+            insights
         )
 
-        # --------------------------------------------------
-        # SAVE PRESENTATION
-        # --------------------------------------------------
+        _add_footer(slide)
 
-        filename = "supermarket_business_analysis.pptx"
+        # ==================================================
+        # SAVE
+        # ==================================================
+
+        filename = (
+            f"analysis_deck_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
+        )
 
         filepath = os.path.join(
             GENERATED_DIR,
             filename
         )
 
-        presentation.save(filepath)
-
-        if not os.path.exists(filepath):
-
-            return {
-                "success": False,
-                "message": (
-                    "PPTX generation completed but "
-                    "file was not found."
-                )
-            }
-
-        file_size = os.path.getsize(filepath)
-
-        if file_size == 0:
-
-            return {
-                "success": False,
-                "message": "Generated PPTX file is empty."
-            }
+        prs.save(
+            filepath
+        )
 
         return {
             "success": True,
-            "message": (
-                "Business analysis PPTX generated successfully."
-            ),
-            "filename": filename,
             "filepath": filepath,
-            "file_size": file_size,
-            "total_bills": total_bills,
-            "total_sales": round(total_sales, 2),
-            "total_gst": round(total_gst, 2),
-            "average_bill": round(average_bill, 2),
-            "low_stock_count": low_stock_count,
-            "total_products": total_products
+            "filename": filename,
+            "days": days,
+            "bill_count": len(bills),
+            "total_sales": float(
+                sales_data["total_sales"]
+            ),
+            "gst_collected": float(
+                sales_data["total_gst"]
+            ),
+            "top_products": [
+                {
+                    "product": name,
+                    "quantity": float(quantity)
+                }
+                for name, quantity
+                in top_products
+            ],
+            "inventory": inventory,
+            "message": (
+                "Business analysis PowerPoint generated "
+                "successfully with real charts."
+            )
         }
 
     except Exception as e:

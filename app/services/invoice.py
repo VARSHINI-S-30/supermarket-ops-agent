@@ -1,104 +1,94 @@
 import os
-from datetime import timezone
+from decimal import Decimal
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
     Table,
-    TableStyle
+    TableStyle,
+    KeepTogether
 )
 
 from app.database.db import SessionLocal
 from app.database.models import (
     Bill,
-    BillItem,
     Product,
     Customer
 )
 
+from app.tools.preferences import get_preference
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-STORE_NAME = "NEBULA SUPERMARKET"
-
-STORE_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 GENERATED_DIR = "generated"
 
+IST = ZoneInfo(
+    "Asia/Kolkata"
+)
 
-# ============================================================
-# MONEY FORMATTER
-# ============================================================
 
-def format_money(amount):
+def _get_preference_value(key):
     """
-    Format a numeric value as Indian Rupee currency.
-    """
-
-    if amount is None:
-        amount = 0.0
-
-    return f"₹{float(amount):,.2f}"
-
-
-# ============================================================
-# DATE FORMATTER
-# ============================================================
-
-def format_invoice_date(created_at):
-    """
-    Convert stored UTC datetime into Indian local time.
+    Retrieve one saved owner preference.
     """
 
-    if not created_at:
-        return "N/A"
+    result = get_preference(key)
 
-    try:
-
-        # Existing database stores naive UTC datetime
-        created_at_utc = created_at.replace(
-            tzinfo=timezone.utc
+    if (
+        result.get("success")
+        and result.get("found")
+    ):
+        return result.get(
+            "preference_value"
         )
 
-        local_time = created_at_utc.astimezone(
-            STORE_TIMEZONE
-        )
-
-        return local_time.strftime(
-            "%d-%m-%Y %I:%M %p"
-        )
-
-    except Exception:
-        return str(created_at)
+    return None
 
 
-# ============================================================
-# GENERATE INVOICE
-# ============================================================
+def _get_shop_name():
+    """
+    Retrieve the configured shop name.
+
+    Falls back to NEBULA SUPERMARKET.
+    """
+
+    shop_name = _get_preference_value(
+        "shop_name"
+    )
+
+    if shop_name:
+        return shop_name
+
+    return "NEBULA SUPERMARKET"
+
+
+def _get_gstin():
+    """
+    Retrieve configured GSTIN.
+    """
+
+    return _get_preference_value(
+        "gstin"
+    )
+
 
 def generate_invoice(bill_id):
     """
-    Generate a PDF invoice for a bill.
+    Generate a PDF invoice for a finalized bill.
 
-    Only finalized bills can generate invoices.
+    The invoice reads shop_name and GSTIN from
+    persistent owner preferences.
     """
 
     db = SessionLocal()
 
     try:
-
-        # ====================================================
-        # FIND BILL
-        # ====================================================
 
         bill = (
             db.query(Bill)
@@ -111,58 +101,26 @@ def generate_invoice(bill_id):
             return {
                 "success": False,
                 "message": (
-                    f"Bill with ID {bill_id} not found."
+                    f"Bill #{bill_id} was not found."
                 )
             }
-
-        # ====================================================
-        # ONLY FINALIZED BILLS
-        # ====================================================
 
         if bill.status != "finalized":
 
             return {
                 "success": False,
                 "message": (
-                    "Invoice can only be generated "
-                    "for a finalized bill."
+                    f"Invoice can only be generated "
+                    f"for finalized bills. "
+                    f"Bill #{bill_id} is "
+                    f"{bill.status}."
                 )
             }
-
-        # ====================================================
-        # GET BILL ITEMS
-        # ====================================================
-
-        items = (
-            db.query(BillItem)
-            .filter(
-                BillItem.bill_id == bill_id
-            )
-            .all()
-        )
-
-        if not items:
-
-            return {
-                "success": False,
-                "message": (
-                    "Cannot generate invoice for "
-                    "an empty bill."
-                )
-            }
-
-        # ====================================================
-        # CREATE GENERATED DIRECTORY
-        # ====================================================
 
         os.makedirs(
             GENERATED_DIR,
             exist_ok=True
         )
-
-        # ====================================================
-        # PDF FILE PATH
-        # ====================================================
 
         filename = (
             f"invoice_{bill.id}.pdf"
@@ -173,13 +131,38 @@ def generate_invoice(bill_id):
             filename
         )
 
-        # ====================================================
-        # GET CUSTOMER
-        # ====================================================
+        shop_name = _get_shop_name()
+        gstin = _get_gstin()
 
-        customer = None
+        created_at = bill.created_at
 
-        if bill.customer_id is not None:
+        if created_at:
+
+            if created_at.tzinfo is None:
+
+                created_at = created_at.replace(
+                    tzinfo=IST
+                )
+
+            created_at = created_at.astimezone(
+                IST
+            )
+
+            invoice_date = created_at.strftime(
+                "%d-%m-%Y %I:%M %p"
+            )
+
+        else:
+
+            invoice_date = datetime.now(
+                IST
+            ).strftime(
+                "%d-%m-%Y %I:%M %p"
+            )
+
+        customer_name = "Walk-in Customer"
+
+        if bill.customer_id:
 
             customer = (
                 db.query(Customer)
@@ -189,11 +172,28 @@ def generate_invoice(bill_id):
                 .first()
             )
 
-        # ====================================================
-        # PDF DOCUMENT
-        # ====================================================
+            if customer:
 
-        document = SimpleDocTemplate(
+                customer_name = (
+                    customer.name
+                    or "Customer"
+                )
+
+        styles = getSampleStyleSheet()
+
+        title_style = styles["Title"]
+        title_style.fontSize = 20
+        title_style.leading = 24
+
+        normal_style = styles["Normal"]
+        normal_style.fontSize = 9
+        normal_style.leading = 12
+
+        small_style = styles["Normal"]
+        small_style.fontSize = 8
+        small_style.leading = 10
+
+        doc = SimpleDocTemplate(
             filepath,
             pagesize=A4,
             rightMargin=15 * mm,
@@ -202,268 +202,101 @@ def generate_invoice(bill_id):
             bottomMargin=15 * mm
         )
 
-        # ====================================================
-        # STYLES
-        # ====================================================
-
-        styles = getSampleStyleSheet()
-
-        store_style = ParagraphStyle(
-            "StoreName",
-            parent=styles["Heading1"],
-            fontSize=18,
-            leading=22,
-            alignment=TA_CENTER,
-            spaceAfter=5
-        )
-
-        title_style = ParagraphStyle(
-            "InvoiceTitle",
-            parent=styles["Heading2"],
-            fontSize=14,
-            leading=18,
-            alignment=TA_CENTER,
-            spaceAfter=10
-        )
-
-        normal_style = ParagraphStyle(
-            "NormalInvoice",
-            parent=styles["Normal"],
-            fontSize=9,
-            leading=12
-        )
-
-        right_style = ParagraphStyle(
-            "RightInvoice",
-            parent=normal_style,
-            alignment=TA_RIGHT
-        )
-
-        # ====================================================
-        # STORY
-        # ====================================================
-
         story = []
 
-        # Store name
-        story.append(
-            Paragraph(
-                STORE_NAME,
-                store_style
-            )
-        )
+        # --------------------------------------------------
+        # HEADER
+        # --------------------------------------------------
 
         story.append(
             Paragraph(
-                "TAX INVOICE",
+                shop_name,
                 title_style
             )
         )
 
         story.append(
-            Spacer(1, 5)
+            Paragraph(
+                "SUPERMARKET INVOICE",
+                styles["Heading2"]
+            )
         )
 
-        # ====================================================
+        if gstin:
+
+            story.append(
+                Paragraph(
+                    f"<b>GSTIN:</b> {gstin}",
+                    normal_style
+                )
+            )
+
+        story.append(
+            Spacer(
+                1,
+                6 * mm
+            )
+        )
+
+        # --------------------------------------------------
         # BILL INFORMATION
-        # ====================================================
+        # --------------------------------------------------
 
-        customer_name = (
-            customer.name
-            if customer
-            else "Walk-in Customer"
-        )
-
-        customer_phone = (
-            customer.phone
-            if customer and customer.phone
-            else "-"
-        )
-
-        bill_information = [
+        bill_info = [
             [
                 Paragraph(
-                    f"<b>Bill No:</b> {bill.id}",
+                    "<b>Invoice No.</b>",
                     normal_style
                 ),
                 Paragraph(
-                    f"<b>Date:</b> "
-                    f"{format_invoice_date(bill.created_at)}",
+                    f"#{bill.id}",
+                    normal_style
+                ),
+                Paragraph(
+                    "<b>Date</b>",
+                    normal_style
+                ),
+                Paragraph(
+                    invoice_date,
                     normal_style
                 )
             ],
             [
                 Paragraph(
-                    f"<b>Customer:</b> "
-                    f"{customer_name}",
+                    "<b>Customer</b>",
                     normal_style
                 ),
                 Paragraph(
-                    f"<b>Phone:</b> "
-                    f"{customer_phone}",
-                    normal_style
-                )
-            ],
-            [
-                Paragraph(
-                    f"<b>Payment Mode:</b> "
-                    f"{bill.payment_mode.upper()}",
+                    customer_name,
                     normal_style
                 ),
                 Paragraph(
-                    f"<b>Status:</b> "
-                    f"{bill.status.upper()}",
+                    "<b>Payment</b>",
+                    normal_style
+                ),
+                Paragraph(
+                    (
+                        bill.payment_mode.upper()
+                        if bill.payment_mode
+                        else "-"
+                    ),
                     normal_style
                 )
             ]
         ]
 
-        information_table = Table(
-            bill_information,
+        bill_table = Table(
+            bill_info,
             colWidths=[
-                85 * mm,
-                85 * mm
+                28 * mm,
+                55 * mm,
+                28 * mm,
+                55 * mm
             ]
         )
 
-        information_table.setStyle(
+        bill_table.setStyle(
             TableStyle([
-                (
-                    "VALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "TOP"
-                ),
-                (
-                    "BOTTOMPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    5
-                ),
-                (
-                    "TOPPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    5
-                )
-            ])
-        )
-
-        story.append(
-            information_table
-        )
-
-        story.append(
-            Spacer(1, 10)
-        )
-
-        # ====================================================
-        # PRODUCT TABLE
-        # ====================================================
-
-        table_data = [
-            [
-                Paragraph(
-                    "<b>Product</b>",
-                    normal_style
-                ),
-                Paragraph(
-                    "<b>SKU</b>",
-                    normal_style
-                ),
-                Paragraph(
-                    "<b>Qty</b>",
-                    right_style
-                ),
-                Paragraph(
-                    "<b>Price</b>",
-                    right_style
-                ),
-                Paragraph(
-                    "<b>GST %</b>",
-                    right_style
-                ),
-                Paragraph(
-                    "<b>Total</b>",
-                    right_style
-                )
-            ]
-        ]
-
-        for item in items:
-
-            product = (
-                db.query(Product)
-                .filter(
-                    Product.id == item.product_id
-                )
-                .first()
-            )
-
-            if not product:
-
-                return {
-                    "success": False,
-                    "message": (
-                        f"Product for bill item "
-                        f"{item.id} was not found."
-                    )
-                }
-
-            table_data.append(
-                [
-                    Paragraph(
-                        product.name,
-                        normal_style
-                    ),
-                    Paragraph(
-                        product.sku,
-                        normal_style
-                    ),
-                    Paragraph(
-                        str(item.quantity),
-                        right_style
-                    ),
-                    Paragraph(
-                        format_money(
-                            item.unit_price
-                        ),
-                        right_style
-                    ),
-                    Paragraph(
-                        f"{item.gst_rate:.2f}%",
-                        right_style
-                    ),
-                    Paragraph(
-                        format_money(
-                            item.total_amount
-                        ),
-                        right_style
-                    )
-                ]
-            )
-
-        product_table = Table(
-            table_data,
-            colWidths=[
-                47 * mm,
-                24 * mm,
-                17 * mm,
-                25 * mm,
-                20 * mm,
-                30 * mm
-            ],
-            repeatRows=1
-        )
-
-        product_table.setStyle(
-            TableStyle([
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.lightgrey
-                ),
                 (
                     "GRID",
                     (0, 0),
@@ -478,91 +311,164 @@ def generate_invoice(bill_id):
                     "MIDDLE"
                 ),
                 (
-                    "ALIGN",
-                    (2, 1),
+                    "BACKGROUND",
+                    (0, 0),
+                    (0, -1),
+                    colors.lightgrey
+                ),
+                (
+                    "BACKGROUND",
+                    (2, 0),
+                    (2, -1),
+                    colors.lightgrey
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
                     (-1, -1),
-                    "RIGHT"
+                    5
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5
                 ),
                 (
                     "TOPPADDING",
                     (0, 0),
                     (-1, -1),
-                    6
+                    5
                 ),
                 (
                     "BOTTOMPADDING",
                     (0, 0),
                     (-1, -1),
-                    6
+                    5
                 )
             ])
         )
 
         story.append(
-            product_table
+            bill_table
         )
 
         story.append(
-            Spacer(1, 15)
+            Spacer(
+                1,
+                6 * mm
+            )
         )
 
-        # ====================================================
-        # TOTALS
-        # ====================================================
+        # --------------------------------------------------
+        # ITEMS
+        # --------------------------------------------------
 
-        totals_data = [
+        item_rows = [
             [
-                Paragraph(
-                    "<b>Subtotal</b>",
-                    normal_style
-                ),
-                Paragraph(
-                    format_money(
-                        bill.subtotal
-                    ),
-                    right_style
-                )
-            ],
-            [
-                Paragraph(
-                    "<b>GST</b>",
-                    normal_style
-                ),
-                Paragraph(
-                    format_money(
-                        bill.gst_amount
-                    ),
-                    right_style
-                )
-            ],
-            [
-                Paragraph(
-                    "<b>Grand Total</b>",
-                    normal_style
-                ),
-                Paragraph(
-                    f"<b>{format_money(bill.total_amount)}</b>",
-                    right_style
-                )
+                "S.No.",
+                "Product",
+                "Qty",
+                "Unit Price",
+                "GST %",
+                "GST",
+                "Total"
             ]
         ]
 
-        totals_table = Table(
-            totals_data,
+        for index, item in enumerate(
+            bill.items,
+            start=1
+        ):
+
+            product = (
+                db.query(Product)
+                .filter(
+                    Product.id == item.product_id
+                )
+                .first()
+            )
+
+            product_name = (
+                product.name
+                if product
+                else "Unknown Product"
+            )
+
+            unit = (
+                product.unit
+                if product
+                else ""
+            )
+
+            item_rows.append([
+                str(index),
+                f"{product_name} ({unit})",
+                str(item.quantity),
+                f"₹{Decimal(str(item.unit_price)):.2f}",
+                f"{Decimal(str(item.gst_rate)):.2f}%",
+                f"₹{Decimal(str(item.gst_amount)):.2f}",
+                f"₹{Decimal(str(item.total_amount)):.2f}"
+            ])
+
+        item_table = Table(
+            item_rows,
             colWidths=[
-                130 * mm,
-                33 * mm
-            ]
+                12 * mm,
+                55 * mm,
+                18 * mm,
+                25 * mm,
+                18 * mm,
+                23 * mm,
+                25 * mm
+            ],
+            repeatRows=1
         )
 
-        totals_table.setStyle(
+        item_table.setStyle(
             TableStyle([
                 (
-                    "LINEABOVE",
-                    (0, 2),
-                    (-1, 2),
-                    1,
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.lightgrey
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (-1, 0),
                     colors.black
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    colors.grey
+                ),
+                (
+                    "ALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "CENTER"
+                ),
+                (
+                    "ALIGN",
+                    (1, 1),
+                    (1, -1),
+                    "LEFT"
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    4
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    4
                 ),
                 (
                     "TOPPADDING",
@@ -575,110 +481,209 @@ def generate_invoice(bill_id):
                     (0, 0),
                     (-1, -1),
                     5
+                )
+            ])
+        )
+
+        story.append(
+            item_table
+        )
+
+        story.append(
+            Spacer(
+                1,
+                6 * mm
+            )
+        )
+
+        # --------------------------------------------------
+        # GST BREAKUP
+        # --------------------------------------------------
+
+        subtotal = Decimal(
+            str(bill.subtotal)
+        )
+
+        gst_amount = Decimal(
+            str(bill.gst_amount)
+        )
+
+        cgst = (
+            gst_amount / Decimal("2")
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        sgst = (
+            gst_amount - cgst
+        ).quantize(
+            Decimal("0.01")
+        )
+
+        total = Decimal(
+            str(bill.total_amount)
+        )
+
+        summary_rows = [
+            [
+                "Taxable Amount",
+                f"₹{subtotal:.2f}"
+            ],
+            [
+                "CGST",
+                f"₹{cgst:.2f}"
+            ],
+            [
+                "SGST",
+                f"₹{sgst:.2f}"
+            ],
+            [
+                "Total GST",
+                f"₹{gst_amount:.2f}"
+            ],
+            [
+                "Grand Total",
+                f"₹{total:.2f}"
+            ]
+        ]
+
+        summary_table = Table(
+            summary_rows,
+            colWidths=[
+                45 * mm,
+                40 * mm
+            ],
+            hAlign="RIGHT"
+        )
+
+        summary_table.setStyle(
+            TableStyle([
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    colors.grey
                 ),
                 (
                     "ALIGN",
                     (1, 0),
                     (1, -1),
                     "RIGHT"
+                ),
+                (
+                    "FONTNAME",
+                    (0, -1),
+                    (-1, -1),
+                    "Helvetica-Bold"
+                ),
+                (
+                    "FONTSIZE",
+                    (0, 0),
+                    (-1, -1),
+                    9
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5
                 )
             ])
         )
 
         story.append(
-            totals_table
+            summary_table
         )
 
-        # ====================================================
-        # CREDIT INFORMATION
-        # ====================================================
-
-        if bill.payment_mode == "credit" and customer:
-
-            story.append(
-                Spacer(1, 10)
+        story.append(
+            Spacer(
+                1,
+                8 * mm
             )
+        )
+
+        # --------------------------------------------------
+        # CREDIT NOTE
+        # --------------------------------------------------
+
+        if bill.payment_mode == "credit":
 
             story.append(
                 Paragraph(
                     (
-                        "<b>Khata / Credit Sale:</b> "
-                        "This amount has been added to "
-                        "the customer's outstanding credit balance."
+                        "<b>Payment Note:</b> "
+                        "This invoice was recorded as "
+                        "credit/khata."
                     ),
                     normal_style
                 )
             )
 
-        # ====================================================
-        # FOOTER
-        # ====================================================
+            story.append(
+                Spacer(
+                    1,
+                    4 * mm
+                )
+            )
 
-        story.append(
-            Spacer(1, 20)
-        )
+        # --------------------------------------------------
+        # FOOTER
+        # --------------------------------------------------
 
         story.append(
             Paragraph(
                 "Thank you for shopping with us!",
-                ParagraphStyle(
-                    "Footer",
-                    parent=normal_style,
-                    alignment=TA_CENTER,
-                    fontSize=10
-                )
+                normal_style
             )
         )
 
-        # ====================================================
-        # BUILD PDF
-        # ====================================================
-
-        document.build(story)
-
-        # ====================================================
-        # VERIFY FILE
-        # ====================================================
-
-        if not os.path.exists(filepath):
-
-            return {
-                "success": False,
-                "message": (
-                    "Invoice generation completed but "
-                    "PDF file was not found."
-                )
-            }
-
-        file_size = os.path.getsize(
-            filepath
+        story.append(
+            Spacer(
+                1,
+                2 * mm
+            )
         )
 
-        if file_size == 0:
+        story.append(
+            Paragraph(
+                "Generated by Nebula Supermarket Ops Agent",
+                small_style
+            )
+        )
 
-            return {
-                "success": False,
-                "message": (
-                    "Generated PDF file is empty."
-                )
-            }
-
-        # ====================================================
-        # SUCCESS
-        # ====================================================
+        doc.build(
+            story
+        )
 
         return {
             "success": True,
-            "message": (
-                "PDF invoice generated successfully."
-            ),
             "bill_id": bill.id,
-            "filename": filename,
             "filepath": filepath,
-            "file_size": file_size,
-            "total_amount": round(
-                float(bill.total_amount),
-                2
+            "filename": filename,
+            "shop_name": shop_name,
+            "gstin": gstin,
+            "message": (
+                f"Invoice for bill #{bill.id} "
+                "generated successfully."
             )
         }
 
