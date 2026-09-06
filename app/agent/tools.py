@@ -4,15 +4,18 @@ from app.tools.inventory import (
     check_stock,
     low_stock,
 )
+
 from app.tools.health import (
-    get_system_health
+    get_system_health,
 )
+
 from app.tools.analytics import (
     get_sales_summary,
     get_daily_sales,
     get_daily_close,
     get_business_health,
 )
+
 from app.tools.customers import (
     add_customer,
     search_customers,
@@ -21,6 +24,7 @@ from app.tools.customers import (
     record_credit_payment,
     get_customer_credit_summary,
 )
+
 from app.tools.product_search import (
     search_products,
 )
@@ -33,19 +37,8 @@ from app.tools.billing import (
     finalize_bill,
 )
 
-from app.tools.khata import (
-    get_customer_credit,
-    record_credit_payment,
-)
-
 from app.tools.reorder import (
     get_reorder_recommendations,
-)
-
-from app.tools.sales import (
-    get_sales_summary,
-    get_daily_sales,
-    get_daily_close,
 )
 
 from app.services.invoice import (

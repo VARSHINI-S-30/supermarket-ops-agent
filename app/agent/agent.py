@@ -38,6 +38,18 @@ MODEL_NAME = "openai/gpt-4o-mini"
 
 
 # ============================================================
+# AGENT SETTINGS
+# ============================================================
+
+# Maximum number of model -> tool -> model cycles
+MAX_TOOL_ROUNDS = 10
+
+# Maximum number of previous conversation messages retained.
+# This prevents Telegram memory from growing indefinitely.
+MAX_HISTORY_MESSAGES = 40
+
+
+# ============================================================
 # SYSTEM PROMPT
 # ============================================================
 
@@ -65,6 +77,7 @@ Never invent:
 - invoice information
 
 Always obtain such information from the available tools.
+
 ============================================================
 SYSTEM HEALTH
 ============================================================
@@ -83,6 +96,7 @@ use get_system_health.
 
 Do not claim the system is healthy without checking
 the tool result.
+
 ============================================================
 OWNER PREFERENCES
 ============================================================
@@ -116,22 +130,20 @@ When finalizing a bill:
 - If the owner explicitly specifies payment mode,
   use the explicitly specified mode.
 - If the owner does not specify payment mode,
-  finalize_bill can automatically use the saved
-  default_payment preference.
+  use the saved default_payment preference.
 - Never invent a payment preference.
 - Never claim payment succeeded unless finalize_bill
   returns success=true.
 
-Examples:
+Supported payment modes:
 
-"Bill this and use cash."
+- cash
+- upi
+- card
+- credit
 
--> finalize_bill(payment_mode="cash")
-
-"Bill this."
-
--> finalize_bill without payment_mode.
-   The tool will use the persistent default payment.
+If no payment mode is specified and no default payment
+preference exists, ask the user to specify one.
 
 ============================================================
 SHOP NAME
@@ -141,12 +153,11 @@ If the owner says:
 
 "Set my shop name to Sri Lakshmi Supermarket."
 
-Use:
+Use set_preference with:
 
-set_preference(
-    preference_key="shop_name",
-    preference_value="Sri Lakshmi Supermarket"
-)
+preference_key = shop_name
+
+preference_value = Sri Lakshmi Supermarket
 
 Invoice generation automatically reads the saved shop name.
 
@@ -154,20 +165,11 @@ Invoice generation automatically reads the saved shop name.
 GSTIN
 ============================================================
 
-If the owner says:
-
-"My GSTIN is 33ABCDE1234F1Z5."
-
-Use:
-
-set_preference(
-    preference_key="gstin",
-    preference_value="33ABCDE1234F1Z5"
-)
-
-Invoice generation automatically reads the saved GSTIN.
+If the owner provides a GSTIN, store it using set_preference.
 
 Never invent a GSTIN.
+
+Invoice generation automatically reads the saved GSTIN.
 
 ============================================================
 PREFERENCE PERSISTENCE
@@ -181,8 +183,6 @@ Preferences survive:
 
 Conversation memory and owner preferences are separate.
 
-/reset clears conversation memory only.
-
 If the owner asks what their preferences are,
 use get_preferences.
 
@@ -191,44 +191,22 @@ use set_preference.
 
 Do not claim that a preference was saved unless
 set_preference succeeds.
+
 ============================================================
 USING SAVED PREFERENCES
 ============================================================
 
-Persistent preferences are operational settings, not merely
-conversation memories.
+Persistent preferences are operational settings.
 
-The agent must use saved preferences when they are relevant
-to a business operation.
+When a saved preference is relevant to an operation,
+use it.
 
-For example:
+Explicit user instructions always have priority
+over saved preferences.
 
-If:
-default_payment = upi
+Example:
 
-and the user says:
-
-"Finalize bill 15"
-
-the agent must retrieve the default payment preference
-and use UPI for finalization.
-
-If:
-shop_name = Sri Lakshmi Supermarket
-
-then generated invoices should use that shop name.
-
-If:
-gstin = 33ABCDE1234F1Z5
-
-then generated invoices should use that GSTIN.
-
-Explicit user instructions always have priority over saved
-defaults.
-
-For example:
-
-Saved preference:
+Saved:
 default_payment = upi
 
 User:
@@ -236,13 +214,14 @@ User:
 
 Use cash.
 
-Never silently override an explicit instruction with a
-saved preference.
+Do not silently override an explicit instruction.
+
 ============================================================
 BUSINESS DOMAIN
 ============================================================
 
 The supermarket operates using:
+
 - Indian Rupees (INR)
 - Product SKUs
 - Quantity and units
@@ -262,9 +241,9 @@ If the user gives a product name rather than a SKU:
 
 1. Use search_products.
 2. Examine the returned products.
-3. If exactly one product clearly matches, use that product.
+3. If exactly one product clearly matches, use it.
 4. If multiple products could match, ask the user to clarify.
-5. Never guess a SKU.
+5. Never guess a product ID or SKU.
 
 ============================================================
 STOCK
@@ -275,9 +254,10 @@ For stock-related questions always use the appropriate inventory tool.
 Never estimate inventory.
 
 If the user asks:
+
 "How much Maggi is left?"
 
-Use search_products first if the SKU is unknown,
+Use search_products if necessary,
 then check_stock.
 
 ============================================================
@@ -292,8 +272,8 @@ Typical workflow:
 2. identify products
 3. add_item_to_bill
 4. get_bill when needed
-5. update_bill_item if the user wants changes
-6. finalize_bill when the customer is ready to pay
+5. update_bill_item if needed
+6. finalize_bill when customer is ready
 7. generate_invoice after successful finalization
 
 Never manually invent the final bill total.
@@ -317,9 +297,13 @@ Then:
 
 Maintain bill context from the conversation.
 
-If a bill ID has already been created in the conversation, reuse it.
+If a bill ID has already been created in the conversation,
+reuse it.
 
 Do not create a new bill unnecessarily.
+
+If the current conversation does not contain a bill ID,
+ask for or create a bill as appropriate.
 
 ============================================================
 STOCK SAFETY
@@ -330,9 +314,9 @@ Never allow overselling.
 The business tools enforce stock validation.
 
 If a tool rejects an order because of insufficient stock,
-communicate the actual available quantity to the user.
+communicate the actual available quantity.
 
-Do not claim that the purchase succeeded if the tool returned failure.
+Do not claim that the purchase succeeded if the tool failed.
 
 ============================================================
 FINALIZING BILLS
@@ -345,77 +329,23 @@ Supported payment modes:
 - card
 - credit
 
-For credit/khata payments:
+For credit:
 
 - A customer must be associated with the bill.
 - Never create credit for an unknown customer.
 
-Default payment preference:
+If payment_mode is not explicitly provided:
 
-The owner may save a persistent preference called:
+1. Check the saved default_payment preference.
+2. If found, use it.
+3. If not found, ask the user for a payment mode.
 
-default_payment
-
-Possible values:
-
-- cash
-- upi
-- card
-- credit
-
-When the owner has explicitly saved a default payment:
-
-1. Use get_preference("default_payment") when the
-   payment mode is not explicitly provided.
-
-2. If the preference exists, use that payment mode.
-
-3. Never override an explicitly provided payment mode.
-
-Example:
-
-Owner preference:
-default_payment = upi
-
-User:
-"Finalize bill 15"
-
-Correct behavior:
-
-get_preference("default_payment")
-        ->
-upi
-
-Then:
-
-finalize_bill(
-    bill_id=15,
-    payment_mode="upi"
-)
-
-If the user says:
-
-"Finalize bill 15 with cash"
-
-then use:
-
-payment_mode="cash"
-
-and do NOT use the default UPI preference.
-
-Never guess a payment mode if:
-
-- no default payment preference exists
-- and the user has not provided a payment mode
-
-In that case, ask the user to specify:
-
-cash, UPI, card, or credit.
+Explicit payment mode always wins.
 
 Finalization is idempotent.
 
-If finalize_bill reports that a bill was already finalized,
-do not claim that another payment or stock deduction occurred.
+If finalize_bill reports that the bill was already finalized,
+do not claim that stock was deducted again.
 
 Never say payment succeeded unless finalize_bill succeeds.
 
@@ -423,68 +353,22 @@ Never say payment succeeded unless finalize_bill succeeds.
 KHATA / CUSTOMER CREDIT
 ============================================================
 
-Credit payments represent customer outstanding balance.
-
-When the user wants to pay by credit/khata:
+When the user wants to use credit:
 
 1. A valid customer must be associated with the bill.
+2. Never invent a customer.
+3. Use customer tools to identify the customer.
+4. Only then finalize the credit bill.
 
-2. If the customer is unknown, do not invent a customer.
+When the user asks how much a customer owes,
+use get_customer_credit or get_customer_credit_summary.
 
-3. Search or ask for the customer's name/phone.
+When recording a credit payment,
+use record_credit_payment.
 
-4. Use the customer tools to identify the customer.
+Never claim that a credit payment succeeded unless
+the tool succeeds.
 
-5. Only then create/finalize a credit bill.
-
-For existing customer credit:
-
-Use:
-
-get_customer_credit(customer_id)
-
-when the user asks how much the customer owes.
-
-When the customer makes a credit payment:
-
-Use:
-
-record_credit_payment(
-    customer_id,
-    amount
-)
-
-Never record a payment greater than the customer's
-outstanding credit.
-
-Never claim that a credit payment succeeded unless the
-record_credit_payment tool succeeds.
-
-Never allow a customer credit balance to become negative.
-
-Examples:
-
-User:
-"How much does customer 3 owe?"
-
-Use:
-get_customer_credit(customer_id=3)
-
-User:
-"Customer 3 paid ₹500 towards khata."
-
-Use:
-record_credit_payment(
-    customer_id=3,
-    amount=500
-)
-
-If customer 3 owes only ₹300, the tool must reject
-the ₹500 payment.
-
-Do not manually calculate and pretend the payment succeeded.
-
-The database/tool result is the source of truth.
 ============================================================
 CUSTOMER MANAGEMENT
 ============================================================
@@ -498,36 +382,20 @@ Use customer tools when the user wants to:
 - search for a customer
 - check customer credit
 - record a credit payment
-- view customer credit status
 
-When the user gives a customer name but not an ID:
+If the user gives a customer name but not an ID:
 
 1. Use search_customers.
-
-2. If exactly one clear customer matches,
-   use that customer.
-
-3. If multiple customers match,
-   ask the user to clarify.
-
-4. Never randomly select between multiple matching
-   customers.
-
-When creating a customer:
-
-Use add_customer.
-
-Do not claim that a customer was created unless
-add_customer succeeds.
-
-Customer information persists independently of the
-conversation context.
+2. If exactly one clear customer matches, use it.
+3. If multiple customers match, ask for clarification.
+4. Never randomly choose between customers.
 
 ============================================================
 SALES
 ============================================================
 
 Use:
+
 - get_sales_summary
 - get_daily_sales
 - get_daily_close
@@ -535,53 +403,6 @@ Use:
 for sales-related questions.
 
 Never invent sales numbers.
-
-============================================================
-DAILY OPERATIONS & BUSINESS INTELLIGENCE
-============================================================
-
-The supermarket owner can ask for sales and operational
-summaries in natural language.
-
-Use the analytics tools instead of calculating business
-numbers manually.
-
-When the owner asks:
-
-"Today's sales?"
-
-Use:
-
-get_daily_sales()
-
-When the owner asks:
-
-"How much did we sell today?"
-
-Use:
-
-get_daily_sales()
-
-When the owner asks:
-
-"How much GST did we collect?"
-
-Use the sales analytics tool and report the GST value returned
-by the database.
-
-When the owner asks:
-
-"How much cash versus UPI?"
-
-Use the sales analytics tool and report the payment
-breakdown returned by the database.
-
-When the owner asks:
-
-"What were the top-selling items?"
-
-Use the sales analytics tool and report the top_products
-returned by the database.
 
 ============================================================
 DAILY CLOSE
@@ -599,37 +420,16 @@ or:
 
 "Give me the daily closing summary"
 
-use:
+use get_daily_close.
 
-get_daily_close()
-
-The daily close should include:
-
-- total sales
-- subtotal
-- GST collected
-- number of finalized bills
-- average bill value
-- cash sales
-- UPI sales
-- card sales
-- credit sales
-- top-selling products
-- low-stock products
-- out-of-stock products
-
-The daily close is a reporting operation.
-
-Do not claim that accounting data was changed unless
+Do not claim that accounting data changed unless
 a tool actually performs a write operation.
-
-Do not invent missing values.
 
 ============================================================
 BUSINESS HEALTH
 ============================================================
 
-When the owner asks broad questions such as:
+For questions such as:
 
 "How is the store doing?"
 
@@ -637,23 +437,9 @@ When the owner asks broad questions such as:
 
 "How are sales and stock?"
 
-use:
-
-get_business_health()
-
-Use the tool result to explain:
-
-- sales performance
-- GST
-- payment mix
-- inventory health
-- low-stock products
-- out-of-stock products
-- operational recommendations
+use get_business_health.
 
 Recommendations must be grounded in actual tool results.
-
-Do not invent sales numbers, inventory numbers or products.
 
 ============================================================
 REORDER
@@ -661,7 +447,7 @@ REORDER
 
 When asked what needs reordering:
 
-Use get_reorder_recommendations.
+use get_reorder_recommendations.
 
 Do not invent reorder quantities.
 
@@ -672,6 +458,7 @@ INVOICE
 Invoices can only be generated for finalized bills.
 
 If the user requests an invoice:
+
 1. Verify the bill exists.
 2. Verify it is finalized.
 3. Use generate_invoice.
@@ -680,10 +467,16 @@ If the user requests an invoice:
 BUSINESS ANALYSIS
 ============================================================
 
-If the user requests a business analysis, management report,
-sales analysis, or presentation:
+If the user requests:
 
-Use generate_analysis_deck.
+- business analysis
+- management report
+- sales analysis
+- presentation
+- PPT
+- PowerPoint
+
+use generate_analysis_deck.
 
 ============================================================
 AMBIGUITY
@@ -697,17 +490,39 @@ Do not guess.
 ERROR HANDLING
 ============================================================
 
-If a tool returns success = false:
+If a tool returns:
 
-Do not pretend the operation succeeded.
+success = false
 
-Instead, explain the tool's message naturally.
+do not pretend the operation succeeded.
+
+Explain the tool's message naturally.
+
+============================================================
+TOOL EXECUTION
+============================================================
+
+Tools are the source of truth for supermarket data.
+
+For a business operation:
+
+1. Understand the user's request.
+2. Select the appropriate tool.
+3. Execute the tool.
+4. Inspect its result.
+5. If another tool is needed, continue.
+6. Only provide the final answer after the required
+   operations are complete.
+
+Do not stop after an intermediate tool result if
+the user's request still requires another operation.
 
 ============================================================
 RESPONSE STYLE
 ============================================================
 
 Be:
+
 - concise
 - professional
 - helpful
@@ -719,22 +534,11 @@ Use INR formatting where appropriate.
 Do not expose internal tool names unless useful.
 
 Do not expose hidden reasoning or chain-of-thought.
-
-============================================================
-IMPORTANT TOOL RULE
-============================================================
-
-Tools are the source of truth for supermarket data.
-
-Reason about the user's request, select the appropriate tool,
-execute it, inspect its result, and continue if another tool is needed.
-
-Do not answer prematurely if a tool is required.
 """
 
 
 # ============================================================
-# OPENAI / OPENROUTER TOOL SCHEMA
+# BUILD OPENAI TOOL SCHEMAS
 # ============================================================
 
 def build_openai_tools():
@@ -759,15 +563,23 @@ def build_openai_tools():
         for parameter_name, parameter_info in parameters.items():
 
             properties[parameter_name] = {
-                "type": parameter_info.get("type", "string"),
+                "type": parameter_info.get(
+                    "type",
+                    "string"
+                ),
                 "description": parameter_info.get(
                     "description",
                     parameter_name
                 )
             }
 
-            if parameter_info.get("required", False):
-                required.append(parameter_name)
+            if parameter_info.get(
+                "required",
+                False
+            ):
+                required.append(
+                    parameter_name
+                )
 
         tools.append(
             {
@@ -795,6 +607,7 @@ def build_openai_tools():
 def serialize_tool_result(result):
 
     try:
+
         return json.dumps(
             result,
             ensure_ascii=False,
@@ -821,21 +634,432 @@ def normalize_conversation(conversation):
     if conversation is None:
         return []
 
-    if not isinstance(conversation, list):
+    if not isinstance(
+        conversation,
+        list
+    ):
         raise ValueError(
             "conversation must be a list."
         )
 
-    return conversation.copy()
+    cleaned = []
+
+    for message in conversation:
+
+        if not isinstance(
+            message,
+            dict
+        ):
+            continue
+
+        role = message.get("role")
+
+        # ----------------------------------------------------
+        # NORMAL USER MESSAGE
+        # ----------------------------------------------------
+
+        if role == "user":
+
+            content = message.get(
+                "content",
+                ""
+            )
+
+            if content is None:
+                content = ""
+
+            cleaned.append(
+                {
+                    "role": "user",
+                    "content": str(content)
+                }
+            )
+
+        # ----------------------------------------------------
+        # SYSTEM MESSAGE
+        # ----------------------------------------------------
+
+        elif role == "system":
+
+            content = message.get(
+                "content",
+                ""
+            )
+
+            cleaned.append(
+                {
+                    "role": "system",
+                    "content": str(content)
+                }
+            )
+
+        # ----------------------------------------------------
+        # ASSISTANT MESSAGE
+        # ----------------------------------------------------
+
+        elif role == "assistant":
+
+            assistant_message = {
+                "role": "assistant"
+            }
+
+            if "content" in message:
+
+                assistant_message["content"] = (
+                    message.get("content")
+                )
+
+            # IMPORTANT:
+            # Preserve tool_calls because a following
+            # role="tool" message is only valid when the
+            # preceding assistant message contains the
+            # corresponding tool call.
+            if message.get("tool_calls"):
+
+                valid_tool_calls = []
+
+                for tool_call in message["tool_calls"]:
+
+                    if not isinstance(
+                        tool_call,
+                        dict
+                    ):
+                        continue
+
+                    tool_call_id = tool_call.get(
+                        "id"
+                    )
+
+                    function = tool_call.get(
+                        "function"
+                    )
+
+                    if not tool_call_id:
+                        continue
+
+                    if not isinstance(
+                        function,
+                        dict
+                    ):
+                        continue
+
+                    function_name = function.get(
+                        "name"
+                    )
+
+                    function_arguments = function.get(
+                        "arguments",
+                        "{}"
+                    )
+
+                    if not function_name:
+                        continue
+
+                    valid_tool_calls.append(
+                        {
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": function_name,
+                                "arguments": function_arguments
+                            }
+                        }
+                    )
+
+                if valid_tool_calls:
+
+                    assistant_message[
+                        "tool_calls"
+                    ] = valid_tool_calls
+
+            # Only keep assistant messages that actually
+            # contain content or tool calls.
+            if (
+                assistant_message.get("content") is not None
+                or assistant_message.get("tool_calls")
+            ):
+
+                cleaned.append(
+                    assistant_message
+                )
+
+        # ----------------------------------------------------
+        # TOOL MESSAGE
+        # ----------------------------------------------------
+
+        elif role == "tool":
+
+            tool_call_id = message.get(
+                "tool_call_id"
+            )
+
+            content = message.get(
+                "content",
+                ""
+            )
+
+            # We temporarily store tool messages.
+            # They will be validated below.
+            if tool_call_id:
+
+                cleaned.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": str(content)
+                    }
+                )
+
+    # --------------------------------------------------------
+    # REPAIR TOOL MESSAGE SEQUENCES
+    # --------------------------------------------------------
+    #
+    # OpenAI-compatible APIs require:
+    #
+    # assistant(tool_calls=[...])
+    # tool(tool_call_id=...)
+    #
+    # A standalone tool message is invalid.
+    #
+    # This removes orphaned tool messages that may have been
+    # stored by an older version of the application.
+    # --------------------------------------------------------
+
+    repaired = []
+
+    pending_tool_ids = set()
+
+    for message in cleaned:
+
+        role = message.get("role")
+
+        if role == "assistant":
+
+            tool_calls = message.get(
+                "tool_calls",
+                []
+            )
+
+            if tool_calls:
+
+                pending_tool_ids = {
+                    tool_call.get("id")
+                    for tool_call in tool_calls
+                    if tool_call.get("id")
+                }
+
+            else:
+
+                pending_tool_ids = set()
+
+            repaired.append(
+                message
+            )
+
+        elif role == "tool":
+
+            tool_call_id = message.get(
+                "tool_call_id"
+            )
+
+            if tool_call_id in pending_tool_ids:
+
+                repaired.append(
+                    message
+                )
+
+                pending_tool_ids.discard(
+                    tool_call_id
+                )
+
+            else:
+
+                # Orphan tool result.
+                # Do NOT send it to OpenRouter.
+                continue
+
+        else:
+
+            # A new user/system message means any unfinished
+            # previous tool sequence is no longer safe to reuse.
+            if role in {
+                "user",
+                "system"
+            }:
+                pending_tool_ids = set()
+
+            repaired.append(
+                message
+            )
+
+    # --------------------------------------------------------
+    # LIMIT HISTORY
+    # --------------------------------------------------------
+
+    system_messages = [
+        message
+        for message in repaired
+        if message.get("role") == "system"
+    ]
+
+    non_system_messages = [
+        message
+        for message in repaired
+        if message.get("role") != "system"
+    ]
+
+    non_system_messages = non_system_messages[
+        -MAX_HISTORY_MESSAGES:
+    ]
+
+    return (
+        system_messages[:1]
+        + non_system_messages
+    )
 
 
 # ============================================================
-# AGENT FUNCTION
+# SAFE APPEND ASSISTANT MESSAGE
 # ============================================================
 
-def run_agent(user_message, conversation=None):
+def create_assistant_message(
+    assistant_message
+):
 
-    if not user_message or not user_message.strip():
+    assistant_dict = {
+        "role": "assistant"
+    }
+
+    if assistant_message.content is not None:
+
+        assistant_dict["content"] = (
+            assistant_message.content
+        )
+
+    if assistant_message.tool_calls:
+
+        assistant_dict["tool_calls"] = []
+
+        for tool_call in assistant_message.tool_calls:
+
+            assistant_dict["tool_calls"].append(
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments
+                    }
+                }
+            )
+
+    return assistant_dict
+
+
+# ============================================================
+# EXECUTE ONE TOOL CALL
+# ============================================================
+
+def execute_agent_tool(tool_call):
+
+    tool_name = tool_call.function.name
+
+    raw_arguments = (
+        tool_call.function.arguments
+    )
+
+    # --------------------------------------------------------
+    # CHECK TOOL
+    # --------------------------------------------------------
+
+    if tool_name not in TOOL_REGISTRY:
+
+        return {
+            "success": False,
+            "message": (
+                f"Unknown tool requested: {tool_name}"
+            )
+        }
+
+    # --------------------------------------------------------
+    # PARSE ARGUMENTS
+    # --------------------------------------------------------
+
+    try:
+
+        arguments = json.loads(
+            raw_arguments
+        )
+
+        if not isinstance(
+            arguments,
+            dict
+        ):
+
+            raise ValueError(
+                "Tool arguments must be a JSON object."
+            )
+
+    except Exception as e:
+
+        return {
+            "success": False,
+            "message": (
+                f"Invalid arguments for tool "
+                f"'{tool_name}': {str(e)}"
+            )
+        }
+
+    # --------------------------------------------------------
+    # EXECUTE BUSINESS TOOL
+    # --------------------------------------------------------
+
+    try:
+
+        result = execute_tool(
+            tool_name,
+            arguments
+        )
+
+        if result is None:
+
+            return {
+                "success": False,
+                "message": (
+                    f"Tool '{tool_name}' returned no result."
+                )
+            }
+
+        return result
+
+    except Exception as e:
+
+        return {
+            "success": False,
+            "message": (
+                f"Tool '{tool_name}' failed: "
+                f"{str(e)}"
+            )
+        }
+
+
+# ============================================================
+# MAIN AGENT FUNCTION
+# ============================================================
+
+def run_agent(
+    user_message,
+    conversation=None
+):
+
+    # --------------------------------------------------------
+    # VALIDATE USER MESSAGE
+    # --------------------------------------------------------
+
+    if (
+        not user_message
+        or not user_message.strip()
+    ):
 
         return {
             "success": False,
@@ -844,10 +1068,22 @@ def run_agent(user_message, conversation=None):
             "conversation": conversation or []
         }
 
-    messages = normalize_conversation(conversation)
+    # --------------------------------------------------------
+    # NORMALIZE / REPAIR OLD CONVERSATION
+    # --------------------------------------------------------
+
+    try:
+
+        messages = normalize_conversation(
+            conversation
+        )
+
+    except Exception as e:
+
+        messages = []
 
     # --------------------------------------------------------
-    # Add system prompt
+    # SYSTEM PROMPT
     # --------------------------------------------------------
 
     has_system_message = any(
@@ -866,7 +1102,7 @@ def run_agent(user_message, conversation=None):
         )
 
     # --------------------------------------------------------
-    # Add user message
+    # ADD USER MESSAGE
     # --------------------------------------------------------
 
     messages.append(
@@ -876,15 +1112,19 @@ def run_agent(user_message, conversation=None):
         }
     )
 
+    # --------------------------------------------------------
+    # BUILD TOOLS
+    # --------------------------------------------------------
+
     tools = build_openai_tools()
 
     # --------------------------------------------------------
-    # Agent control loop
+    # AGENT CONTROL LOOP
     # --------------------------------------------------------
 
-    max_tool_rounds = 5
-
-    for _ in range(max_tool_rounds):
+    for round_number in range(
+        MAX_TOOL_ROUNDS
+    ):
 
         try:
 
@@ -898,10 +1138,29 @@ def run_agent(user_message, conversation=None):
 
         except Exception as e:
 
-            error_message = (
-                "I couldn't connect to the AI service. "
-                f"Error: {str(e)}"
-            )
+            error_text = str(e)
+
+            # ------------------------------------------------
+            # FRIENDLY ERROR FOR INVALID HISTORY
+            # ------------------------------------------------
+
+            if (
+                "role 'tool'" in error_text
+                or "preceding message with 'tool_calls'" in error_text
+                or "tool_call_id" in error_text
+            ):
+
+                error_message = (
+                    "The previous conversation state was invalid. "
+                    "Please send the request again."
+                )
+
+            else:
+
+                error_message = (
+                    "I couldn't connect to the AI service. "
+                    f"Error: {error_text}"
+                )
 
             return {
                 "success": False,
@@ -909,6 +1168,10 @@ def run_agent(user_message, conversation=None):
                 "response": error_message,
                 "conversation": messages
             }
+
+        # ----------------------------------------------------
+        # CHECK RESPONSE
+        # ----------------------------------------------------
 
         if not response.choices:
 
@@ -923,43 +1186,24 @@ def run_agent(user_message, conversation=None):
                 "conversation": messages
             }
 
-        assistant_message = response.choices[0].message
+        assistant_message = (
+            response.choices[0].message
+        )
 
         # ----------------------------------------------------
-        # Add assistant message to conversation
+        # CREATE VALID ASSISTANT MESSAGE
         # ----------------------------------------------------
 
-        assistant_dict = {
-            "role": "assistant"
-        }
+        assistant_dict = create_assistant_message(
+            assistant_message
+        )
 
-        if assistant_message.content is not None:
-
-            assistant_dict["content"] = (
-                assistant_message.content
-            )
-
-        if assistant_message.tool_calls:
-
-            assistant_dict["tool_calls"] = []
-
-            for tool_call in assistant_message.tool_calls:
-
-                assistant_dict["tool_calls"].append(
-                    {
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments
-                        }
-                    }
-                )
-
-        messages.append(assistant_dict)
+        messages.append(
+            assistant_dict
+        )
 
         # ----------------------------------------------------
-        # Final answer
+        # FINAL ANSWER
         # ----------------------------------------------------
 
         if not assistant_message.tool_calls:
@@ -978,83 +1222,22 @@ def run_agent(user_message, conversation=None):
             }
 
         # ----------------------------------------------------
-        # Execute tools
+        # EXECUTE ALL TOOL CALLS
         # ----------------------------------------------------
 
         for tool_call in assistant_message.tool_calls:
 
-            tool_name = tool_call.function.name
+            tool_result = execute_agent_tool(
+                tool_call
+            )
 
-            raw_arguments = tool_call.function.arguments
-
-            # ------------------------------------------------
-            # Check tool
-            # ------------------------------------------------
-
-            if tool_name not in TOOL_REGISTRY:
-
-                tool_result = {
-                    "success": False,
-                    "message": (
-                        f"Unknown tool requested: {tool_name}"
-                    )
-                }
-
-            else:
-
-                # --------------------------------------------
-                # Parse arguments
-                # --------------------------------------------
-
-                try:
-
-                    arguments = json.loads(
-                        raw_arguments
-                    )
-
-                    if not isinstance(arguments, dict):
-
-                        raise ValueError(
-                            "Tool arguments must be a JSON object."
-                        )
-
-                except Exception as e:
-
-                    tool_result = {
-                        "success": False,
-                        "message": (
-                            f"Invalid arguments for tool "
-                            f"'{tool_name}': {str(e)}"
-                        )
-                    }
-
-                else:
-
-                    # ----------------------------------------
-                    # Execute business tool
-                    # ----------------------------------------
-
-                    try:
-
-                        tool_result = execute_tool(
-                            tool_name,
-                            arguments
-                        )
-
-                    except Exception as e:
-
-                        tool_result = {
-                            "success": False,
-                            "message": (
-                                f"Tool '{tool_name}' failed: "
-                                f"{str(e)}"
-                            )
-                        }
-
-            # ------------------------------------------------
-            # Send result back to model
-            # ------------------------------------------------
-
+            # IMPORTANT:
+            #
+            # Every tool call MUST have a matching
+            # role="tool" message with the exact
+            # tool_call_id.
+            #
+            # This fixes the OpenRouter 400 error.
             messages.append(
                 {
                     "role": "tool",
@@ -1066,12 +1249,13 @@ def run_agent(user_message, conversation=None):
             )
 
     # ========================================================
-    # MAXIMUM TOOL ROUNDS
+    # MAX TOOL ROUNDS REACHED
     # ========================================================
 
     error_message = (
         "I was unable to complete the request within "
-        "the allowed number of operations."
+        f"the allowed {MAX_TOOL_ROUNDS} tool operations. "
+        "Please try the request again."
     )
 
     return {
@@ -1092,20 +1276,30 @@ if __name__ == "__main__":
     print("NEBULA SUPERMARKET AI AGENT")
     print("=" * 60)
 
+    print(
+        f"\nMaximum tool rounds: {MAX_TOOL_ROUNDS}"
+    )
+
     print("\nType 'exit' to stop.\n")
 
     conversation = []
 
     while True:
 
-        user_input = input("You: ").strip()
+        user_input = input(
+            "You: "
+        ).strip()
 
         if user_input.lower() in {
             "exit",
             "quit",
             "q"
         }:
-            print("Goodbye!")
+
+            print(
+                "Goodbye!"
+            )
+
             break
 
         if not user_input:
@@ -1118,8 +1312,12 @@ if __name__ == "__main__":
 
         print("\nAgent:")
 
-        print(result["message"])
+        print(
+            result["message"]
+        )
 
-        conversation = result["conversation"]
+        conversation = result[
+            "conversation"
+        ]
 
         print()
