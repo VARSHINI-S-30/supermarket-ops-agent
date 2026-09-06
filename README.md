@@ -1437,79 +1437,6 @@ Telegram Sessions
 
 ---
 
-# 📌 Assignment Coverage
-
-| Requirement               | Implementation              |
-| ------------------------- | --------------------------- |
-| Telegram-only interface   | Telegram Bot                |
-| Agent-first architecture  | Custom AI agent             |
-| Tool-based business rules | Tool registry               |
-| Inventory management      | Inventory tools             |
-| Product search            | Search tool                 |
-| Multi-turn billing        | Conversation + bill tools   |
-| Oversell protection       | Tool-level stock validation |
-| Idempotent finalization   | Finalization guard          |
-| GST calculation           | Billing logic               |
-| Multiple payments         | Cash / UPI / Card / Credit  |
-| Customer credit           | Khata tools                 |
-| Low-stock detection       | Inventory analytics         |
-| Reorder recommendations   | Reorder tool                |
-| Daily sales               | Sales analytics             |
-| Daily close               | Daily-close tool            |
-| PDF invoice               | ReportLab                   |
-| PPTX analysis             | python-pptx                 |
-| Persistent preferences    | OwnerPreference database    |
-| Conversation reset        | `/reset`                    |
-| System diagnostics        | Health tool                 |
-
----
-
-# 🎬 Suggested Demo Flow
-
-For a project demonstration, the following sequence showcases the main capabilities:
-
-```text
-1. /start
-      ↓
-2. Check inventory
-      ↓
-3. Search a product
-      ↓
-4. Create a bill
-      ↓
-5. Add multiple items
-      ↓
-6. Show the bill
-      ↓
-7. Edit an item quantity
-      ↓
-8. Finalize using UPI
-      ↓
-9. Finalize the same bill again
-      ↓
-10. Generate PDF invoice
-      ↓
-11. Save shop preference
-      ↓
-12. Reset conversation
-      ↓
-13. Verify preference persistence
-      ↓
-14. Demonstrate oversell protection
-      ↓
-15. Check daily sales
-      ↓
-16. Generate reorder recommendations
-      ↓
-17. Generate PPTX analysis
-      ↓
-18. Run system health check
-```
-
-This demonstrates the major agent, business-rule, persistence, analytics, and document-generation capabilities.
-
----
-
 # 🌟 Key Features
 
 ```text
@@ -1560,21 +1487,6 @@ This demonstrates the major agent, business-rule, persistence, analytics, and do
 * [ ] Cloud database deployment
 * [ ] Role-based access control
 * [ ] Advanced business intelligence dashboards
-
----
-
-# ⚠️ Security Considerations
-
-Before publishing or sharing the repository:
-
-* Never commit `.env`.
-* Never commit API keys.
-* Never commit Telegram bot tokens.
-* Never commit private credentials.
-* Never expose production database files.
-* Use placeholder values in configuration examples.
-* Keep generated business documents private when they contain sensitive information.
-* Regenerate any credential immediately if it is accidentally exposed.
 
 ---
 
